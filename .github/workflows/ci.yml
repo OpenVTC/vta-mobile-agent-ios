@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ios-simulator-test:
+    # The consumed VtaMobileCore.xcframework ships iOS slices only, so the
+    # smoke test must run on an iOS Simulator destination, not the macOS host.
+    name: iOS Simulator test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Show available simulators
+        run: xcrun simctl list devices available | grep -i iphone
+
+      - name: Build + test on iOS Simulator
+        # Pins to a simulator name present on the runner image. If the image's
+        # device list changes, update the name (see the step above).
+        run: |
+          xcodebuild test \
+            -scheme VtaMobileAgent-Package \
+            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            -skipPackagePluginValidation
