@@ -79,10 +79,29 @@ xcodebuild test -scheme VtaMobileAgent-Package \
 
 ## Running the app
 
-SwiftPM doesn't build iOS `.app` bundles. To run the SwiftUI shell in `App/`,
-open `Package.swift` in Xcode and add an iOS App target
-(`bundle id: org.openvtc.vta.agent`) that depends on the `VtaMobileAgent`
-product — see the header comment in `App/VtaMobileAgentApp.swift`.
+The SwiftUI app target (`App/`, bundle id `org.openvtc.vta.agent`) is described
+declaratively in `project.yml` and generated with [XcodeGen] — the `.xcodeproj`
+is **not** committed (regenerate it any time):
+
+```sh
+brew install xcodegen        # once
+xcodegen generate            # writes VtaMobileAgentApp.xcodeproj
+open VtaMobileAgentApp.xcodeproj
+```
+
+Pick an **installed** iPhone simulator (the latest-runtime one — e.g. iPhone 17
+— is safest; `name=iPhone 16` only resolves if a matching OS is installed) and
+Run. The screen shows the live engine version via `engineInfo()` across the FFI.
+
+CLI build/run without opening Xcode:
+
+```sh
+xcodegen generate
+xcodebuild build -scheme VtaMobileAgentApp \
+  -destination 'platform=iOS Simulator,name=iPhone 17'
+```
+
+[XcodeGen]: https://github.com/yonaskolb/XcodeGen
 
 ## License
 

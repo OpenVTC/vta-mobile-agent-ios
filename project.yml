@@ -1,0 +1,34 @@
+# XcodeGen spec for the iOS app target. The app consumes the local Swift package
+# (the `VtaMobileAgent` product, which wraps the vta-mobile-core engine).
+#
+# The generated .xcodeproj is NOT committed (gitignored) — regenerate it with:
+#   xcodegen generate && open VtaMobileAgentApp.xcodeproj
+name: VtaMobileAgentApp
+options:
+  bundleIdPrefix: org.openvtc.vta
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+packages:
+  VtaMobileAgent:
+    path: .
+
+targets:
+  VtaMobileAgentApp:
+    type: application
+    platform: iOS
+    sources:
+      - App
+    dependencies:
+      - package: VtaMobileAgent
+        product: VtaMobileAgent
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.openvtc.vta.agent
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.9"

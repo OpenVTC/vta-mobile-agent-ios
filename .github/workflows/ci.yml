@@ -26,3 +26,26 @@ jobs:
             -scheme VtaMobileAgent-Package \
             -destination 'platform=iOS Simulator,name=iPhone 16' \
             -skipPackagePluginValidation
+
+  ios-app-build:
+    # Generate the app project from project.yml and build the SwiftUI app target
+    # for the simulator, so the app (not just the package) stays buildable.
+    name: iOS app build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: Show available simulators
+        run: xcrun simctl list devices available | grep -i iphone
+
+      - name: Build the app for the iOS Simulator
+        run: |
+          xcodebuild build \
+            -scheme VtaMobileAgentApp \
+            -destination 'platform=iOS Simulator,name=iPhone 16'
