@@ -5,3 +5,6 @@ DerivedData/
 *.xcworkspace/xcuserdata/
 .DS_Store
 /VtaMobileCore.xcframework
+
+# XcodeGen-generated project (regenerate with `xcodegen generate`)
+*.xcodeproj/
