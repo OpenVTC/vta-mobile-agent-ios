@@ -22,6 +22,17 @@ public struct VtaRestClient {
     /// POST a document body to `path` (kept verbatim, incl. the trailing slash
     /// on `/auth/`) and return the response body, or throw on a non-2xx.
     func post(path: String, body: String, bearer: String? = nil) async throws -> String {
+        let (status, text) = try await postRaw(path: path, body: body, bearer: bearer)
+        guard (200..<300).contains(status) else {
+            throw AgentError.http(status: status, body: text)
+        }
+        return text
+    }
+
+    /// POST without raising on the HTTP status — returns `(status, body)`. Used
+    /// when a non-2xx is expected and carries data (the `403` step-up trigger,
+    /// whose body holds the `approveRequest`).
+    func postRaw(path: String, body: String, bearer: String? = nil) async throws -> (Int, String) {
         guard let url = URL(string: base + path) else {
             throw AgentError.badResponse("invalid URL: \(base + path)")
         }
@@ -35,10 +46,6 @@ public struct VtaRestClient {
 
         let (data, response) = try await session.data(for: req)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        let text = String(decoding: data, as: UTF8.self)
-        guard (200..<300).contains(status) else {
-            throw AgentError.http(status: status, body: text)
-        }
-        return text
+        return (status, String(decoding: data, as: UTF8.self))
     }
 }

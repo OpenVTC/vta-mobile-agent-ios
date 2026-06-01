@@ -51,6 +51,31 @@ struct ContentView: View {
                     }
                 }
 
+                if model.isAuthenticated {
+                    Section("AAL2 step-up approver") {
+                        Button("Step up this session (demo)") {
+                            Task { await model.demoStepUp() }
+                        }
+                        .disabled(model.busy)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("…or ratify a request relayed from another device:")
+                                .font(.caption).foregroundStyle(.secondary)
+                            TextEditor(text: $model.pastedApproveRequest)
+                                .font(.system(.caption2, design: .monospaced))
+                                .frame(height: 90)
+                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+                            Button("Approve pasted request") {
+                                Task { await model.approvePasted() }
+                            }
+                            .disabled(model.busy)
+                        }
+                        if let stepUp = model.stepUpStatus {
+                            Text(stepUp).font(.footnote)
+                        }
+                    }
+                }
+
                 Section("Status") {
                     Text(model.status).font(.footnote)
                     if let whoami = model.whoamiSummary {

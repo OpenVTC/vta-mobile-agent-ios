@@ -14,9 +14,13 @@ final class AgentModel: ObservableObject {
     @Published var busy = false
     @Published var isAuthenticated = false
     @Published var whoamiSummary: String?
+    @Published var pastedApproveRequest = ""
+    @Published var stepUpStatus: String?
 
     private var identity: HolderIdentity?
     private var tokens: AuthTokens?
+
+    private var trimmedDid: String { vtaDid.trimmingCharacters(in: .whitespaces) }
 
     /// Load (or first-time create) the device holder key and surface its did:key.
     func start() {
@@ -75,6 +79,51 @@ final class AgentModel: ObservableObject {
             whoamiSummary = "session \(info.sessionId)\nacr \(info.acr ?? "—") · roles: \(roles)"
         } catch {
             whoamiSummary = "whoami failed — \(error.localizedDescription)"
+        }
+    }
+
+    /// Self-contained demo: provoke + approve a step-up on this device's own
+    /// session, then reflect the elevated `acr` via whoami.
+    func demoStepUp() async {
+        guard let identity, let tokens, let url = normalizedURL(), !trimmedDid.isEmpty else {
+            stepUpStatus = "Authenticate (with a VTA DID) first."
+            return
+        }
+        busy = true
+        defer { busy = false }
+        stepUpStatus = "Stepping up this session…"
+        do {
+            let outcome = try await VtaMobileAgent.demoSelfStepUp(
+                vtaURL: url, vtaDid: trimmedDid, identity: identity, accessToken: tokens.accessToken)
+            stepUpStatus = "✅ Elevated to \(outcome.grantedAcr ?? "—")"
+            await whoami() // live session now reports the elevated acr
+        } catch {
+            stepUpStatus = "❌ Step-up failed — \(error.localizedDescription)"
+        }
+    }
+
+    /// Proxied approver: ratify a step-up whose approve-request was relayed here
+    /// from another device (paste the VTA `403` body or the bare document).
+    func approvePasted() async {
+        guard let identity, let tokens, let url = normalizedURL(), !trimmedDid.isEmpty else {
+            stepUpStatus = "Authenticate (with a VTA DID) first."
+            return
+        }
+        let request = pastedApproveRequest.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !request.isEmpty else {
+            stepUpStatus = "Paste an approve-request to ratify."
+            return
+        }
+        busy = true
+        defer { busy = false }
+        stepUpStatus = "Approving…"
+        do {
+            let outcome = try await VtaMobileAgent.approveStepUp(
+                approveRequest: request, vtaURL: url, vtaDid: trimmedDid,
+                identity: identity, accessToken: tokens.accessToken)
+            stepUpStatus = "✅ Approved — session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")"
+        } catch {
+            stepUpStatus = "❌ Approve failed — \(error.localizedDescription)"
         }
     }
 
