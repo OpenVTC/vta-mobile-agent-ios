@@ -23,12 +23,20 @@ targets:
     dependencies:
       - package: VtaMobileAgent
         product: VtaMobileAgent
+    # Generated Info.plist (gitignored, like the .xcodeproj). Carries a
+    # DEV-ONLY App Transport Security exception so the app can reach a VTA over
+    # plain http (e.g. a local `http://<ip>:8100`). Tighten/remove before
+    # shipping against an https-only VTA.
+    info:
+      path: App/Info.plist
+      properties:
+        UILaunchScreen: {}
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.openvtc.vta.agent
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
-        GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
         TARGETED_DEVICE_FAMILY: "1,2"
         SWIFT_VERSION: "5.9"
