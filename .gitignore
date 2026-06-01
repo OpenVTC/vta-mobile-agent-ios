@@ -6,5 +6,6 @@ DerivedData/
 .DS_Store
 /VtaMobileCore.xcframework
 
-# XcodeGen-generated project (regenerate with `xcodegen generate`)
+# XcodeGen-generated project + Info.plist (regenerate with `xcodegen generate`)
 *.xcodeproj/
+App/Info.plist
