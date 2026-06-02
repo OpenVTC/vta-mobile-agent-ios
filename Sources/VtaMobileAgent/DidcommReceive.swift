@@ -2,25 +2,52 @@ import Foundation
 import VtaMobileCore
 
 /// Inbound DIDComm for the **proxied** step-up path: the VTA addresses an
-/// `auth/step-up/approve-request/0.1` to the holder's approver DID (this
-/// device) and delivers it over DIDComm (via the holder's mediator), instead of
-/// a desktop relaying a `403` body out-of-band. This device unpacks it with the
-/// holder key and ratifies it via the existing `approveStepUp`.
+/// `auth/step-up/approve-request/0.1` to the holder's approver DID (this device)
+/// and delivers it over DIDComm via the holder's mediator, instead of a desktop
+/// relaying a `403` body out-of-band. This device approves it with the holder
+/// key via the existing `approveStepUp`.
+///
+/// Two entry points share one core (`approveIfStepUpRequest`):
+/// - `receiveStepUpOnce(session:…)` — pulls the next message off a live
+///   `MediatorSession` (ATM has already unpacked it). This is the live path.
+/// - `receiveStepUpApproveRequest(packed:…)` — unpacks a raw packed message
+///   itself (for transports that hand over ciphertext directly).
 extension VtaMobileAgent {
     /// Trust Task `type` of a step-up approve-request.
     static let stepUpApproveRequestType =
         "https://trusttasks.org/spec/auth/step-up/approve-request/0.1"
 
-    /// Unpack `packed` — an authcrypt DIDComm message received from the VTA —
-    /// and, if it carries a step-up approve-request, approve it. Returns the
-    /// outcome, or `nil` when the message isn't a step-up approve-request (the
-    /// caller routes other message types elsewhere).
+    /// Pull the next inbound message off a connected `MediatorSession` (waiting
+    /// up to `timeoutSecs`) and, if it carries a step-up approve-request,
+    /// approve it. Returns the outcome, `nil` if nothing arrived in time or the
+    /// message wasn't a step-up request. Call in a loop to keep servicing.
+    ///
+    /// `MediatorSession` (ATM) has already authenticated the sender and
+    /// decrypted under the holder key, so the message is plaintext here.
+    @discardableResult
+    public static func receiveStepUpOnce(
+        session: MediatorSession,
+        vtaURL: URL,
+        vtaDid: String,
+        identity: HolderIdentity,
+        accessToken: String,
+        timeoutSecs: UInt64 = 30
+    ) async throws -> StepUpOutcome? {
+        guard let messageJson = try await session.receiveNext(timeoutSecs: timeoutSecs) else {
+            return nil  // nothing within the timeout
+        }
+        return try await approveIfStepUpRequest(
+            messageJson: messageJson, vtaURL: vtaURL, vtaDid: vtaDid,
+            identity: identity, accessToken: accessToken)
+    }
+
+    /// Unpack a raw `packed` authcrypt message from the VTA and, if it carries a
+    /// step-up approve-request, approve it. For transports that deliver
+    /// ciphertext directly (not via `MediatorSession`, which unpacks for you).
     ///
     /// `vtaPeer` carries the VTA's key-agreement public key so the engine can
-    /// authenticate the authcrypt sender; the caller resolves it from the VTA's
-    /// DID document (the mediator/pickup layer). The unpacked message MUST be
-    /// sender-authenticated — an anoncrypt or unauthenticated message is
-    /// refused, since approving a step-up is a holder-authorizing action.
+    /// authenticate the authcrypt sender. The message MUST be
+    /// sender-authenticated — approving a step-up is a holder-authorizing action.
     @discardableResult
     public static func receiveStepUpApproveRequest(
         packed: String,
@@ -38,10 +65,22 @@ extension VtaMobileAgent {
             throw AgentError.badResponse(
                 "inbound DIDComm message was not sender-authenticated; refusing to act on it")
         }
-        // The unpacked plaintext is a DIDComm message `{ id, type, body, … }`;
-        // the approve-request Trust Task rides in `body` (the convention the
-        // VTA's outbound send will follow). Extract it and approve.
-        guard let approveRequest = didcommBody(unpacked.messageJson),
+        return try await approveIfStepUpRequest(
+            messageJson: unpacked.messageJson, vtaURL: vtaURL, vtaDid: vtaDid,
+            identity: identity, accessToken: accessToken)
+    }
+
+    /// Core: given an **unpacked** DIDComm message `{ id, type, body, … }`,
+    /// approve it iff `body` is a step-up approve-request. The Trust Task rides
+    /// in the DIDComm `body` (the convention the VTA's outbound send follows).
+    static func approveIfStepUpRequest(
+        messageJson: String,
+        vtaURL: URL,
+        vtaDid: String,
+        identity: HolderIdentity,
+        accessToken: String
+    ) async throws -> StepUpOutcome? {
+        guard let approveRequest = didcommBody(messageJson),
             isStepUpApproveRequest(approveRequest)
         else {
             return nil

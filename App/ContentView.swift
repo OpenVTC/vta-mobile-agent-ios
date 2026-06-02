@@ -59,6 +59,19 @@ struct ContentView: View {
                         .disabled(model.busy)
 
                         VStack(alignment: .leading, spacing: 4) {
+                            Text("…or listen on a mediator and approve requests live:")
+                                .font(.caption).foregroundStyle(.secondary)
+                            TextField("Mediator DID (did:web:… / did:webvh:…)", text: $model.mediatorDid)
+                                .font(.system(.footnote, design: .monospaced))
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                            Button(model.listening ? "Stop listening" : "Listen for step-ups") {
+                                Task { await model.toggleMediatorListen() }
+                            }
+                            .disabled(model.busy && !model.listening)
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
                             Text("…or ratify a request relayed from another device:")
                                 .font(.caption).foregroundStyle(.secondary)
                             TextEditor(text: $model.pastedApproveRequest)

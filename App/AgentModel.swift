@@ -16,9 +16,13 @@ final class AgentModel: ObservableObject {
     @Published var whoamiSummary: String?
     @Published var pastedApproveRequest = ""
     @Published var stepUpStatus: String?
+    @Published var mediatorDid = ""
+    @Published var listening = false
 
     private var identity: HolderIdentity?
     private var tokens: AuthTokens?
+    private var mediatorSession: MediatorSession?
+    private var listenTask: Task<Void, Never>?
 
     private var trimmedDid: String { vtaDid.trimmingCharacters(in: .whitespaces) }
 
@@ -125,6 +129,74 @@ final class AgentModel: ObservableObject {
         } catch {
             stepUpStatus = "❌ Approve failed — \(error.localizedDescription)"
         }
+    }
+
+    /// Live proxied approver: connect to the holder's mediator and service
+    /// VTA-pushed step-up approve-requests as they arrive (no copy-paste). Toggle
+    /// off to disconnect. This is the end-to-end path — the VTA addresses an
+    /// approve-request to this device's DID over DIDComm, the mediator delivers
+    /// it, and we ratify it automatically with the holder key.
+    func toggleMediatorListen() async {
+        if listening {
+            await stopMediatorListen()
+            return
+        }
+        guard let identity, let tokens, let url = normalizedURL(), !trimmedDid.isEmpty else {
+            stepUpStatus = "Authenticate (with a VTA DID) first."
+            return
+        }
+        let mediator = mediatorDid.trimmingCharacters(in: .whitespaces)
+        guard !mediator.isEmpty else {
+            stepUpStatus = "Enter the mediator DID to listen on."
+            return
+        }
+
+        busy = true
+        stepUpStatus = "Connecting to mediator…"
+        do {
+            let session = try await identity.connectMediator(
+                vtaDid: trimmedDid, mediatorDid: mediator)
+            mediatorSession = session
+            listening = true
+            stepUpStatus = "👂 Listening for step-up requests…"
+            let accessToken = tokens.accessToken
+            // Drive the receive loop off the main actor; each `receiveStepUpOnce`
+            // waits up to its timeout then loops, ratifying any approve-request.
+            listenTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    do {
+                        let outcome = try await VtaMobileAgent.receiveStepUpOnce(
+                            session: session, vtaURL: url, vtaDid: self?.trimmedDid ?? "",
+                            identity: identity, accessToken: accessToken)
+                        guard let self else { return }
+                        if let outcome {
+                            self.stepUpStatus =
+                                "✅ Approved — session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")"
+                        }
+                    } catch {
+                        guard let self else { return }
+                        if !Task.isCancelled {
+                            self.stepUpStatus = "❌ Listener error — \(error.localizedDescription)"
+                        }
+                        return  // connection dropped; require an explicit reconnect
+                    }
+                }
+            }
+        } catch {
+            stepUpStatus = "❌ Mediator connect failed — \(error.localizedDescription)"
+        }
+        busy = false
+    }
+
+    private func stopMediatorListen() async {
+        listenTask?.cancel()
+        listenTask = nil
+        if let session = mediatorSession {
+            await session.shutdown()
+        }
+        mediatorSession = nil
+        listening = false
+        stepUpStatus = "Stopped listening."
     }
 
     private func normalizedURL() -> URL? {
