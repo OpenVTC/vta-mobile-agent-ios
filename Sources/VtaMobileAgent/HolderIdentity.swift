@@ -71,6 +71,17 @@ public final class HolderIdentity: Signer {
     public func sign(payload: Data) throws -> Data {
         try privateKey.signature(for: payload)
     }
+
+    /// Derive this identity's DIDComm holder keys — the X25519 key-agreement
+    /// keypair (Edwards→Montgomery from the Ed25519 signing key) the engine
+    /// needs to stand up a `DidcommSession` for unpacking inbound messages.
+    ///
+    /// The Ed25519 seed crosses the FFI here (the engine derives X25519 from
+    /// it); it stays on-device. New in engine v0.2.0 (`didcomm_holder_keys`).
+    public func didcommHolderKeys() throws -> HolderKeys {
+        try VtaMobileCore.didcommHolderKeys(
+            did: didKey, signingPrivateEd25519: privateKey.rawRepresentation)
+    }
 }
 
 /// Minimal Keychain wrapper for a single generic-password item (the holder key).

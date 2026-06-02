@@ -2690,6 +2690,31 @@ public func challengeLenBytes(challengeB64url: String) throws -> UInt32 {
 }
 
 /**
+ * Derive the DIDComm [`HolderKeys`] for an Ed25519 `did:key` holder from its
+ * signing seed, so the native layer can open a [`DidcommSession`] without
+ * re-implementing key derivation.
+ *
+ * The key-agreement (X25519) key is the **standard ed25519→x25519 conversion**
+ * of the holder signing key, so its public half equals the `keyAgreement` a
+ * resolver derives from the `did:key`. That means anyone resolving the holder
+ * did:key (e.g. a VTA wanting to send an approve-request) can authcrypt to it,
+ * and this session — holding the matching private — can unpack it.
+ *
+ * No new cryptography here: this composes the tested TDK conversions
+ * (`affinidi_crypto::ed25519::{ed25519_private_to_x25519, ed25519_public_to_x25519}`),
+ * per the workspace "Default to DIDs" guidance. `signing_private_ed25519` is
+ * the 32-byte Ed25519 seed; it never leaves the device beyond this struct.
+ */
+public func didcommHolderKeys(did: String, signingPrivateEd25519: Data) throws -> HolderKeys {
+    return try FfiConverterTypeHolderKeys.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
+        uniffi_vta_mobile_core_fn_func_didcomm_holder_keys(
+            FfiConverterString.lower(did),
+            FfiConverterData.lower(signingPrivateEd25519), $0
+        )
+    })
+}
+
+/**
  * Returns engine metadata as a structured record (exercises UniFFI record
  * codegen across the boundary).
  */
@@ -2875,6 +2900,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_func_challenge_len_bytes() != 3415 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_vta_mobile_core_checksum_func_didcomm_holder_keys() != 42414 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_func_engine_info() != 27653 {
