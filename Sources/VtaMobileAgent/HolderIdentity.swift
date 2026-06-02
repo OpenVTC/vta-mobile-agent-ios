@@ -82,6 +82,26 @@ public final class HolderIdentity: Signer {
         try VtaMobileCore.didcommHolderKeys(
             did: didKey, signingPrivateEd25519: privateKey.rawRepresentation)
     }
+
+    /// Open a live DIDComm session to `mediatorDid` as this holder — the inbound
+    /// channel for VTA-pushed step-up approve-requests. The returned
+    /// `MediatorSession` authenticates to the mediator (challenge-auth), then
+    /// `receiveNext` pulls messages off message-pickup 3.0 over a live WebSocket.
+    /// `vtaDid` is the expected sender the engine resolves to authenticate
+    /// inbound authcrypt.
+    ///
+    /// The Ed25519 seed crosses the FFI here (the engine derives the X25519
+    /// key-agreement key it authenticates with); it stays on-device. Keeping
+    /// `connect` on `HolderIdentity` keeps `privateKey` encapsulated — callers
+    /// never touch the raw seed.
+    public func connectMediator(vtaDid: String, mediatorDid: String) async throws -> MediatorSession
+    {
+        try await MediatorSession.connect(
+            holderDid: didKey,
+            holderSigningPrivateEd25519: privateKey.rawRepresentation,
+            vtaDid: vtaDid,
+            mediatorDid: mediatorDid)
+    }
 }
 
 /// Minimal Keychain wrapper for a single generic-password item (the holder key).

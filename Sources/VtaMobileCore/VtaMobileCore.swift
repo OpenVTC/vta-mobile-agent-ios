@@ -735,6 +735,192 @@ public func FfiConverterTypeDidcommSession_lower(_ value: DidcommSession) -> Uns
 }
 
 /**
+ * A live DIDComm session to a mediator, scoped to one holder identity.
+ */
+public protocol MediatorSessionProtocol: AnyObject {
+    /**
+     * Wait up to `timeout_secs` for the next inbound DIDComm message from the
+     * mediator. Returns the unpacked message as JSON (`{ id, type, body, … }`)
+     * — the application Trust Task (e.g. the approve-request) rides in `body` —
+     * or `None` if nothing arrived within the timeout. Call again to keep
+     * polling.
+     */
+    func receiveNext(timeoutSecs: UInt64) async throws -> String?
+
+    /**
+     * Gracefully close the mediator connection (live-delivery WebSocket).
+     */
+    func shutdown() async
+}
+
+/**
+ * A live DIDComm session to a mediator, scoped to one holder identity.
+ */
+open class MediatorSession:
+    MediatorSessionProtocol
+{
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    // Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+    public required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public init(noPointer _: NoPointer) {
+        pointer = nil
+    }
+
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_vta_mobile_core_fn_clone_mediatorsession(self.pointer, $0) }
+    }
+
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_vta_mobile_core_fn_free_mediatorsession(pointer, $0) }
+    }
+
+    /**
+     * Connect to `mediator_did` as the holder and open live delivery.
+     *
+     * - `holder_did`: the holder's `did:key`.
+     * - `holder_signing_private_ed25519`: the holder's 32-byte Ed25519 seed
+     * (the key behind its `did:key`). It stays in the engine; only derived
+     * DIDComm secrets reach the ATM secrets resolver.
+     * - `vta_did`: the peer (VTA) this holder converses with.
+     * - `mediator_did`: the mediator to connect through.
+     */
+    public static func connect(holderDid: String, holderSigningPrivateEd25519: Data, vtaDid: String, mediatorDid: String) async throws -> MediatorSession {
+        return
+            try await uniffiRustCallAsync(
+                rustFutureFunc: {
+                    uniffi_vta_mobile_core_fn_constructor_mediatorsession_connect(FfiConverterString.lower(holderDid), FfiConverterData.lower(holderSigningPrivateEd25519), FfiConverterString.lower(vtaDid), FfiConverterString.lower(mediatorDid))
+                },
+                pollFunc: ffi_vta_mobile_core_rust_future_poll_pointer,
+                completeFunc: ffi_vta_mobile_core_rust_future_complete_pointer,
+                freeFunc: ffi_vta_mobile_core_rust_future_free_pointer,
+                liftFunc: FfiConverterTypeMediatorSession.lift,
+                errorHandler: FfiConverterTypeFfiError.lift
+            )
+    }
+
+    /**
+     * Wait up to `timeout_secs` for the next inbound DIDComm message from the
+     * mediator. Returns the unpacked message as JSON (`{ id, type, body, … }`)
+     * — the application Trust Task (e.g. the approve-request) rides in `body` —
+     * or `None` if nothing arrived within the timeout. Call again to keep
+     * polling.
+     */
+    open func receiveNext(timeoutSecs: UInt64) async throws -> String? {
+        return
+            try await uniffiRustCallAsync(
+                rustFutureFunc: {
+                    uniffi_vta_mobile_core_fn_method_mediatorsession_receive_next(
+                        self.uniffiClonePointer(),
+                        FfiConverterUInt64.lower(timeoutSecs)
+                    )
+                },
+                pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
+                completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
+                freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
+                liftFunc: FfiConverterOptionString.lift,
+                errorHandler: FfiConverterTypeFfiError.lift
+            )
+    }
+
+    /**
+     * Gracefully close the mediator connection (live-delivery WebSocket).
+     */
+    open func shutdown() async {
+        return
+            try! await uniffiRustCallAsync(
+                rustFutureFunc: {
+                    uniffi_vta_mobile_core_fn_method_mediatorsession_shutdown(
+                        self.uniffiClonePointer()
+                    )
+                },
+                pollFunc: ffi_vta_mobile_core_rust_future_poll_void,
+                completeFunc: ffi_vta_mobile_core_rust_future_complete_void,
+                freeFunc: ffi_vta_mobile_core_rust_future_free_void,
+                liftFunc: { $0 },
+                errorHandler: nil
+            )
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMediatorSession: FfiConverter {
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = MediatorSession
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> MediatorSession {
+        return MediatorSession(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: MediatorSession) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MediatorSession {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if ptr == nil {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: MediatorSession, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMediatorSession_lift(_ pointer: UnsafeMutableRawPointer) throws -> MediatorSession {
+    return try FfiConverterTypeMediatorSession.lift(pointer)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMediatorSession_lower(_ value: MediatorSession) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeMediatorSession.lower(value)
+}
+
+/**
  * The envelope + echo fields for an approve-response. `id` and `issued_at` are
  * supplied by the native layer (which owns identifiers and the clock), keeping
  * these builders pure and deterministic.
@@ -2074,6 +2260,11 @@ public enum FfiError {
      * The requested operation is part of a not-yet-wired build-out slice.
      */
     case Unimplemented(what: String)
+    /**
+     * A DIDComm mediator transport operation failed (connect, authenticate,
+     * receive). Network/protocol failures from the live mediator surface here.
+     */
+    case Transport(reason: String)
 }
 
 #if swift(>=5.8)
@@ -2094,6 +2285,9 @@ public struct FfiConverterTypeFfiError: FfiConverterRustBuffer {
         case 3: return try .Unimplemented(
                 what: FfiConverterString.read(from: &buf)
             )
+        case 4: return try .Transport(
+                reason: FfiConverterString.read(from: &buf)
+            )
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -2111,6 +2305,10 @@ public struct FfiConverterTypeFfiError: FfiConverterRustBuffer {
         case let .Unimplemented(what):
             writeInt(&buf, Int32(3))
             FfiConverterString.write(what, into: &buf)
+
+        case let .Transport(reason):
+            writeInt(&buf, Int32(4))
+            FfiConverterString.write(reason, into: &buf)
         }
     }
 }
@@ -2950,7 +3148,16 @@ private var initializationResult: InitializationResult = {
     if uniffi_vta_mobile_core_checksum_method_didcommsession_unpack() != 38726 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_vta_mobile_core_checksum_method_mediatorsession_receive_next() != 7212 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_vta_mobile_core_checksum_method_mediatorsession_shutdown() != 60334 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_vta_mobile_core_checksum_constructor_didcommsession_new() != 3414 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_vta_mobile_core_checksum_constructor_mediatorsession_connect() != 6555 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_method_signer_did() != 10383 {
