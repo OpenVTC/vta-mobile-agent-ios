@@ -25,13 +25,20 @@ struct ContentView: View {
                 }
 
                 Section("VTA") {
-                    TextField("URL (e.g. http://192.168.1.10:8100)", text: $model.vtaURL)
+                    TextField("VTA DID (did:webvh:… / did:web:…)", text: $model.vtaDid)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button("Resolve endpoints from DID") {
+                        Task { await model.resolveFromDid() }
+                    }
+                    .disabled(model.busy)
+                    Text("Resolves the DID's #vta-rest + #vta-didcomm services to fill the URL "
+                        + "and mediator below. Edit them manually if the VTA advertises neither.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    TextField("URL (auto-filled from the DID; editable)", text: $model.vtaURL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
-                    TextField("VTA DID (did:key:… / did:web:…)", text: $model.vtaDid)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
                 }
 
                 Section {

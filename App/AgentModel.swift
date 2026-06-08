@@ -53,6 +53,40 @@ final class AgentModel: ObservableObject {
         }
     }
 
+    /// Resolve the VTA's DID and fill the REST URL + mediator DID from its DID
+    /// document, so the operator enters only the DID. Both fields stay editable
+    /// as a fallback when discovery is partial (the VTA advertises one service
+    /// but not the other).
+    func resolveFromDid() async {
+        let did = trimmedDid
+        guard !did.isEmpty else {
+            status = "Enter the VTA DID first."
+            return
+        }
+        busy = true
+        defer { busy = false }
+        status = "Resolving endpoints from \(did)…"
+        do {
+            let ep = try await resolveVtaEndpoints(did: did)
+            var filled: [String] = []
+            if let rest = ep.restBaseUrl, !rest.isEmpty {
+                vtaURL = rest
+                filled.append("URL")
+            }
+            if let med = ep.mediatorDid, !med.isEmpty {
+                mediatorDid = med
+                filled.append("mediator")
+            }
+            status =
+                filled.isEmpty
+                ? "Resolved the DID, but it advertises no #vta-rest / #vta-didcomm "
+                    + "service — enter the URL / mediator manually."
+                : "✅ Filled \(filled.joined(separator: " + ")) from the DID."
+        } catch {
+            status = "❌ Couldn't resolve \(did) — \(error.localizedDescription)"
+        }
+    }
+
     func authenticate() async {
         guard let identity else {
             status = "Holder key not ready."
