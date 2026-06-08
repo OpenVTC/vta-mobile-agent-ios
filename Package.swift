@@ -9,8 +9,8 @@ import PackageDescription
 // VtaMobileCore.swift asset) and `engineChecksum` (its
 // VtaMobileCore.xcframework.zip.sha256). The Swift wrapper and the binary are a
 // matched set — never mix versions.
-let engineTag = "vta-mobile-core-v0.6.0"
-let engineChecksum = "38f14876b8942297d74bc6f56dc05f311cd6e53daf2d6dc6374240e392813629"
+let engineTag = "vta-mobile-core-v0.6.1"
+let engineChecksum = "1e2f164742d9867030057c4b27e01f97ffec5b46dd523e0e56b1253a29fdef4c"
 
 // Local-dev override: iterate against a locally-built xcframework without a
 // published release. Drop (or symlink) a `VtaMobileCore.xcframework` at the
