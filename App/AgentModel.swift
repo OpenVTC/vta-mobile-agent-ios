@@ -19,6 +19,9 @@ final class AgentModel: ObservableObject {
     @Published var gatewayUrl = ""
     /// Status line for the push-wake flow (registration + push-driven drain).
     @Published var pushStatus: String?
+    /// The device's APNs token (hex), once iOS returns it. Surfaced so it can be
+    /// copied into the gateway's `test-wake-apns` helper for a delivery test.
+    @Published var apnsToken: String?
     /// True once a wake channel is registered (device/set-wake reported capable).
     @Published var pushEnabled = false
     @Published var holderDid = "(loading…)"
@@ -240,6 +243,10 @@ final class AgentModel: ObservableObject {
     /// APNs handed us a device token — register the wake channel: `push/register`
     /// to the gateway, then `device/set-wake` to the VTA.
     func onApnsToken(_ hex: String) async {
+        // Surface the token first, unconditionally — it's useful for the
+        // `test-wake-apns` delivery check even before a VTA is connected.
+        apnsToken = hex
+        print("[vta-agent] APNs device token: \(hex)")
         guard let identity, let tokens, let url = normalizedURL(), !trimmedDid.isEmpty else {
             pushStatus = "Got APNs token — authenticate (with a VTA DID) first, then enable push."
             return

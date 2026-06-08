@@ -103,6 +103,17 @@ struct ContentView: View {
                             if let push = model.pushStatus {
                                 Text(push).font(.footnote)
                             }
+                            if let token = model.apnsToken {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("APNs token (for `test-wake-apns`):")
+                                        .font(.caption2).foregroundStyle(.secondary)
+                                    Text(token)
+                                        .font(.system(.caption2, design: .monospaced))
+                                        .textSelection(.enabled)
+                                        .lineLimit(3)
+                                        .truncationMode(.middle)
+                                }
+                            }
                         }
                     }
                 }

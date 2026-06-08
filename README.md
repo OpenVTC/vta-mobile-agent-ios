@@ -135,6 +135,18 @@ doorbell (push wake-up binding
   builds get a **sandbox** APNs token, so the gateway routes via the APNs sandbox
   host automatically (the registration's `environment` is `.sandbox`).
 
+**Quick delivery check (no VTA).** Tap *Enable push wake*; the app shows its
+**APNs token** in the UI (also `print`ed to the Xcode console). Run the gateway
+with the APNs creds and fire a wake straight at the token — no `did:webvh`
+gateway identity, no VTA:
+
+```sh
+cargo run -- test-wake-apns http://<gateway-host>:8300 <apns-token> org.openvtc.vta.agent
+```
+
+The phone wakes and drains its mediator. (For the full VTA-triggered loop,
+register the wake channel from the app instead and trigger a delegated step-up.)
+
 ## License
 
 Apache-2.0.
