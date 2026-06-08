@@ -2,11 +2,15 @@ import Foundation
 import VtaMobileCore
 
 /// AAL1 → AAL2 **step-up approver**: the device holds the holder key, so it can
-/// ratify a step-up for any of that holder's sessions — including one running
-/// on another device (a desktop hits a gated op, gets a `403` carrying an
-/// `auth/step-up/approve-request/0.1`, and relays it here out-of-band). The
-/// engine builds the holder-signed `approve-response` (did-signed gate; the key
-/// never leaves the device); the VTA consumes it and elevates that session.
+/// ratify a step-up either for one of *its own* holder's sessions (**self** —
+/// e.g. a desktop hits a gated op, gets a `403` carrying an
+/// `auth/step-up/approve-request/0.1`, and relays it here out-of-band) or, as a
+/// registered **delegated** approver, for *another* subject's session (the VTA
+/// addresses the request to this device as that subject's `stepUp.approver`).
+/// The engine builds the holder-signed `approve-response` (did-signed gate; the
+/// key never leaves the device); the VTA verifies the gate against this holder's
+/// key, authorizes the holder for the subject, and elevates the subject's
+/// session.
 extension VtaMobileAgent {
     /// Outcome of submitting an approve-response.
     public struct StepUpOutcome {
@@ -21,8 +25,11 @@ extension VtaMobileAgent {
     /// carries it under `approveRequest`). Posts the holder-signed
     /// approve-response and returns the granted assurance level.
     ///
-    /// `accessToken` must be a token for *this holder's* session — the VTA only
-    /// lets the subject elevate their own sessions (`auth.did == subject`).
+    /// `accessToken` must be a token for *this holder's* session: the VTA binds
+    /// the approve-response's `issuer` to the authenticated caller
+    /// (`auth.did == issuer`), and this device always signs as its own holder.
+    /// The VTA then elevates the subject's session when this holder is the
+    /// subject (**self**) or the subject's authorized **delegated** approver.
     @discardableResult
     public static func approveStepUp(
         approveRequest: String,
@@ -34,16 +41,16 @@ extension VtaMobileAgent {
         let requestDoc = Self.unwrapApproveRequest(approveRequest)
         let request = try parseStepUpRequest(json: requestDoc)
 
-        // We can only sign the did-signed gate for our own holder key.
-        guard request.subject == identity.didKey else {
-            throw AgentError.badResponse(
-                "approve-request is for a different holder (\(request.subject)); "
-                    + "this device holds \(identity.didKey)")
-        }
-
+        // Sign as ourselves — the holder key never leaves the device. When the
+        // request's subject is us this is a *self* step-up (issuer == subject);
+        // when it's a different VID we act as that subject's *delegated*
+        // approver (issuer != subject). Either way we sign as
+        // `issuerDid = our DID`; the VTA verifies the gate against this key and
+        // authorizes us as the subject's approver before elevating, so there is
+        // no holder-side subject restriction to enforce here.
         let draft = ApproveResponseDraft(
             id: "urn:uuid:\(UUID().uuidString)",
-            issuerDid: identity.didKey, // the subject (us) issues + signs
+            issuerDid: identity.didKey, // the approver (us): self when == subject, delegated otherwise
             recipientDid: vtaDid,
             issuedAt: ISO8601DateFormatter().string(from: Date()),
             subject: request.subject,
