@@ -3309,6 +3309,28 @@ public func engineInfo() -> EngineInfo {
 }
 
 /**
+ * Install a log subscriber that writes the engine's — and its dependencies'
+ * (`affinidi-messaging-sdk`, `vta-sdk`, the DID resolver, `reqwest`/`rustls`) —
+ * `tracing` output to **stderr**, which the **Xcode console** surfaces on iOS
+ * (and is visible via the device log on Android). Call once at app launch;
+ * idempotent and safe to call again.
+ *
+ * `directives` is an `EnvFilter` string, e.g. `"info"` or, to debug a stuck
+ * mediator/DIDComm connection,
+ * `"info,vta_mobile_core=debug,vta_sdk=debug,affinidi_messaging_sdk=debug"`.
+ * Without this, the engine's libraries log to a no-op and on-device failures
+ * (TLS handshakes, mediator round-trips) are invisible — only the FFI error
+ * string survives.
+ */
+public func initLogging(directives: String) {
+    try! rustCall {
+        uniffi_vta_mobile_core_fn_func_init_logging(
+            FfiConverterString.lower(directives), $0
+        )
+    }
+}
+
+/**
  * Returns the engine version string. The simplest possible FFI round-trip —
  * the host app's first call to confirm linkage.
  */
@@ -3534,6 +3556,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_func_engine_info() != 27653 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_vta_mobile_core_checksum_func_init_logging() != 2402 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_func_library_version() != 15418 {

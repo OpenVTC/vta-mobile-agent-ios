@@ -1,5 +1,6 @@
 import UIKit
 import UserNotifications
+import VtaMobileCore
 
 /// Bridges UIKit's APNs lifecycle into the SwiftUI app (wired via
 /// `@UIApplicationDelegateAdaptor` in `VtaMobileAgentApp`):
@@ -16,6 +17,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        // Surface the engine's (and the affinidi/rustls stack's) logs to the
+        // Xcode console, so on-device network/DIDComm failures are diagnosable.
+        // `vta_mobile_core`/`vta_sdk`/`affinidi_messaging_sdk` at debug shows the
+        // mediator connect + TLS path; everything else stays at info.
+        initLogging(
+            directives: "info,vta_mobile_core=debug,vta_sdk=debug,affinidi_messaging_sdk=debug,"
+                + "affinidi_messaging_didcomm=debug,affinidi_did_resolver_cache_sdk=debug")
         UNUserNotificationCenter.current().delegate = self
         return true
     }
