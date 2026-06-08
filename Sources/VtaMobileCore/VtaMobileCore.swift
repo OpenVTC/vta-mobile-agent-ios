@@ -1660,6 +1660,90 @@ public func FfiConverterTypePeer_lower(_ value: Peer) -> RustBuffer {
 }
 
 /**
+ * Envelope fields the native layer supplies for a push / device Trust Task
+ * (`id` / `issued_at` — the native layer owns identifiers and the clock).
+ * `issuer` / `recipient` are optional because `push/register` is unauthenticated
+ * and a REST gateway is addressed by URL (no recipient DID); `device/set-wake`
+ * sets both (issuer = device holder DID, recipient = the VTA DID).
+ */
+public struct PushEnvelope {
+    public var id: String
+    public var issuedAt: String
+    public var issuer: String?
+    public var recipient: String?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(id: String, issuedAt: String, issuer: String?, recipient: String?) {
+        self.id = id
+        self.issuedAt = issuedAt
+        self.issuer = issuer
+        self.recipient = recipient
+    }
+}
+
+extension PushEnvelope: Equatable, Hashable {
+    public static func == (lhs: PushEnvelope, rhs: PushEnvelope) -> Bool {
+        if lhs.id != rhs.id {
+            return false
+        }
+        if lhs.issuedAt != rhs.issuedAt {
+            return false
+        }
+        if lhs.issuer != rhs.issuer {
+            return false
+        }
+        if lhs.recipient != rhs.recipient {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(issuedAt)
+        hasher.combine(issuer)
+        hasher.combine(recipient)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePushEnvelope: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PushEnvelope {
+        return
+            try PushEnvelope(
+                id: FfiConverterString.read(from: &buf),
+                issuedAt: FfiConverterString.read(from: &buf),
+                issuer: FfiConverterOptionString.read(from: &buf),
+                recipient: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: PushEnvelope, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.issuedAt, into: &buf)
+        FfiConverterOptionString.write(value.issuer, into: &buf)
+        FfiConverterOptionString.write(value.recipient, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePushEnvelope_lift(_ buf: RustBuffer) throws -> PushEnvelope {
+    return try FfiConverterTypePushEnvelope.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePushEnvelope_lower(_ value: PushEnvelope) -> RustBuffer {
+    return FfiConverterTypePushEnvelope.lower(value)
+}
+
+/**
  * The auth service's view of the holder, from a `whoami` response — the full
  * current session plus the roles/scopes the service holds. The native layer
  * uses it to reconcile local AAL/authorization state after a step-up or policy
@@ -1821,6 +1905,72 @@ public func FfiConverterTypeSessionInfo_lift(_ buf: RustBuffer) throws -> Sessio
 #endif
 public func FfiConverterTypeSessionInfo_lower(_ value: SessionInfo) -> RustBuffer {
     return FfiConverterTypeSessionInfo.lower(value)
+}
+
+/**
+ * Outcome of a `device/set-wake` — whether the device now has a usable wake
+ * channel, and the effective trigger allowlist the VTA provisioned (absent when
+ * the channel was cleared).
+ */
+public struct SetWakeOutcome {
+    public var pushCapable: Bool
+    public var allowedTriggers: [String]?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(pushCapable: Bool, allowedTriggers: [String]?) {
+        self.pushCapable = pushCapable
+        self.allowedTriggers = allowedTriggers
+    }
+}
+
+extension SetWakeOutcome: Equatable, Hashable {
+    public static func == (lhs: SetWakeOutcome, rhs: SetWakeOutcome) -> Bool {
+        if lhs.pushCapable != rhs.pushCapable {
+            return false
+        }
+        if lhs.allowedTriggers != rhs.allowedTriggers {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(pushCapable)
+        hasher.combine(allowedTriggers)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSetWakeOutcome: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SetWakeOutcome {
+        return
+            try SetWakeOutcome(
+                pushCapable: FfiConverterBool.read(from: &buf),
+                allowedTriggers: FfiConverterOptionSequenceString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: SetWakeOutcome, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.pushCapable, into: &buf)
+        FfiConverterOptionSequenceString.write(value.allowedTriggers, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSetWakeOutcome_lift(_ buf: RustBuffer) throws -> SetWakeOutcome {
+    return try FfiConverterTypeSetWakeOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSetWakeOutcome_lower(_ value: SetWakeOutcome) -> RustBuffer {
+    return FfiConverterTypeSetWakeOutcome.lower(value)
 }
 
 /**
@@ -2085,6 +2235,72 @@ public func FfiConverterTypeUnpackedMessage_lower(_ value: UnpackedMessage) -> R
 }
 
 /**
+ * The opaque gateway-issued reference to a device's push channel. Reveals no
+ * platform token. `gateway` is a DID (DIDComm gateway) or an https URL (REST
+ * gateway); the device conveys this — never the token — to its VTA.
+ */
+public struct WakeHandle {
+    public var gateway: String
+    public var handle: String
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(gateway: String, handle: String) {
+        self.gateway = gateway
+        self.handle = handle
+    }
+}
+
+extension WakeHandle: Equatable, Hashable {
+    public static func == (lhs: WakeHandle, rhs: WakeHandle) -> Bool {
+        if lhs.gateway != rhs.gateway {
+            return false
+        }
+        if lhs.handle != rhs.handle {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(gateway)
+        hasher.combine(handle)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWakeHandle: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WakeHandle {
+        return
+            try WakeHandle(
+                gateway: FfiConverterString.read(from: &buf),
+                handle: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: WakeHandle, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.gateway, into: &buf)
+        FfiConverterString.write(value.handle, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWakeHandle_lift(_ buf: RustBuffer) throws -> WakeHandle {
+    return try FfiConverterTypeWakeHandle.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWakeHandle_lower(_ value: WakeHandle) -> RustBuffer {
+    return FfiConverterTypeWakeHandle.lower(value)
+}
+
+/**
  * A WebAuthn assertion produced natively (`ASAuthorization` / Credential
  * Manager). Binary fields are base64url-encoded, mirroring
  * `AuthenticatorAssertionResponse`.
@@ -2190,7 +2406,7 @@ public func FfiConverterTypeWebAuthnAssertion_lower(_ value: WebAuthnAssertion) 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /* 
- * Which APNs environment issued the token — the mediator routes to the matching
+ * Which APNs environment issued the token — the gateway routes to the matching
  * Apple endpoint.
  */
 
@@ -2324,8 +2540,8 @@ extension FfiError: Foundation.LocalizedError {
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /* 
- * The platform discriminator, for messages whose body carries no token
- * (e.g. `delete-device-info`).
+ * The platform discriminator, for the advisory `pushPlatform` hint on
+ * `device/set-wake` (the VTA never sees the token).
  */
 
 public enum PushPlatform {
@@ -2386,8 +2602,10 @@ extension PushPlatform: Equatable, Hashable {}
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /* 
- * A device's platform push channel — the body of a `set-device-info` message.
- * Mirrors the `PushRegistration` shape in the device-binding shared schema.
+ * A device's platform push channel — the token the device registers with its
+ * push **gateway** (`push/register`). The gateway holds it in exchange for an
+ * opaque [`WakeHandle`]; the raw token never leaves the gateway. Mirrors the
+ * `PushRegistration` shape in the device-binding shared schema.
  */
 
 public enum PushRegistration {
@@ -2400,10 +2618,8 @@ public enum PushRegistration {
      */
     case fcm(token: String)
     /**
-     * Web Push (RFC 8030). Carried out-of-band, not via a DIDComm
-     * `set-device-info` — the Aries push-notification protocols cover APNs/FCM
-     * only. Present here so the type mirrors the schema; building a message for
-     * it returns [`FfiError::Unimplemented`].
+     * Web Push (RFC 8030 endpoint + RFC 8291 encryption keys). Self-hostable
+     * via the gateway's VAPID keypair — no Apple/Google account required.
      */
     case webPush(endpoint: String, p256dh: String, auth: String)
 }
@@ -2652,6 +2868,78 @@ private struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterOptionTypeWakeHandle: FfiConverterRustBuffer {
+    typealias SwiftType = WakeHandle?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWakeHandle.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWakeHandle.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterOptionTypePushPlatform: FfiConverterRustBuffer {
+    typealias SwiftType = PushPlatform?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypePushPlatform.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypePushPlatform.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterOptionSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterSequenceString.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterSequenceString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -2784,13 +3072,41 @@ public func buildAuthenticate(env: AuthEnvelope, challenge: String, sessionId: S
 }
 
 /**
- * Builds the DIDComm `delete-device-info` message to unregister this device's
- * push channel (e.g. on logout).
+ * Build a signed `device/set-wake/0.2` the device sends to its **VTA** to convey
+ * the opaque [`WakeHandle`] it obtained from the gateway. The VTA owns the
+ * trigger allowlist and provisions the gateway on the device's behalf.
+ * **Proof-REQUIRED** — holder-signed via the native [`Signer`], so the VTA binds
+ * the wake channel to the subject. Pass `wake_handle: None` to **clear** the
+ * channel (the VTA empties the gateway allowlist; the device becomes
+ * non-wakeable). `push_platform` and `suggested_triggers` are advisory hints the
+ * VTA MAY ignore (it never sees the token; it owns the final allowlist).
  */
-public func buildDeleteDeviceInfo(platform: PushPlatform) throws -> String {
+public func buildDeviceSetWake(env: PushEnvelope, wakeHandle: WakeHandle?, pushPlatform: PushPlatform?, suggestedTriggers: [String], signer: Signer) throws -> String {
     return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_build_delete_device_info(
-            FfiConverterTypePushPlatform.lower(platform), $0
+        uniffi_vta_mobile_core_fn_func_build_device_set_wake(
+            FfiConverterTypePushEnvelope.lower(env),
+            FfiConverterOptionTypeWakeHandle.lower(wakeHandle),
+            FfiConverterOptionTypePushPlatform.lower(pushPlatform),
+            FfiConverterSequenceString.lower(suggestedTriggers),
+            FfiConverterCallbackInterfaceSigner.lower(signer), $0
+        )
+    })
+}
+
+/**
+ * Build an unauthenticated `push/register/0.2` document the device sends to its
+ * push **gateway** to register a platform token. **No proof** — the handle is
+ * opaque and only becomes usable once the `controller_vta_did` provisions a
+ * trigger for it. `controller_vta_did` is the DID of the VTA permitted to
+ * provision this handle's allowlist (the device conveys the handle there next
+ * via [`build_device_set_wake`]).
+ */
+public func buildPushRegister(env: PushEnvelope, registration: PushRegistration, controllerVtaDid: String) throws -> String {
+    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
+        uniffi_vta_mobile_core_fn_func_build_push_register(
+            FfiConverterTypePushEnvelope.lower(env),
+            FfiConverterTypePushRegistration.lower(registration),
+            FfiConverterString.lower(controllerVtaDid), $0
         )
     })
 }
@@ -2841,19 +3157,6 @@ public func buildRevokeSession(env: AuthEnvelope, sessionId: String, reason: Str
             FfiConverterString.lower(sessionId),
             FfiConverterOptionString.lower(reason),
             FfiConverterCallbackInterfaceSigner.lower(signer), $0
-        )
-    })
-}
-
-/**
- * Builds the DIDComm `set-device-info` message (`{type, body}` JSON) the agent
- * sends to its mediator to register or refresh its push channel. The native
- * layer adds envelope headers and authcrypt-packs it before sending.
- */
-public func buildSetDeviceInfo(registration: PushRegistration) throws -> String {
-    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_build_set_device_info(
-            FfiConverterTypePushRegistration.lower(registration), $0
         )
     })
 }
@@ -2949,6 +3252,30 @@ public func parseAuthChallengeResponse(json: String) throws -> AuthChallenge {
 public func parseAuthenticateResponse(json: String) throws -> AuthTokens {
     return try FfiConverterTypeAuthTokens.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
         uniffi_vta_mobile_core_fn_func_parse_authenticate_response(
+            FfiConverterString.lower(json), $0
+        )
+    })
+}
+
+/**
+ * Parse a `device/set-wake/0.2#response` — whether the device is now
+ * push-capable and the effective allowlist the VTA provisioned to the gateway.
+ */
+public func parseDeviceSetWakeResponse(json: String) throws -> SetWakeOutcome {
+    return try FfiConverterTypeSetWakeOutcome.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
+        uniffi_vta_mobile_core_fn_func_parse_device_set_wake_response(
+            FfiConverterString.lower(json), $0
+        )
+    })
+}
+
+/**
+ * Parse a `push/register/0.2#response` — the opaque [`WakeHandle`] the gateway
+ * issued for the registered token.
+ */
+public func parsePushRegisterResponse(json: String) throws -> WakeHandle {
+    return try FfiConverterTypeWakeHandle.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
+        uniffi_vta_mobile_core_fn_func_parse_push_register_response(
             FfiConverterString.lower(json), $0
         )
     })
@@ -3079,7 +3406,10 @@ private var initializationResult: InitializationResult = {
     if uniffi_vta_mobile_core_checksum_func_build_authenticate() != 36319 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_build_delete_device_info() != 5334 {
+    if uniffi_vta_mobile_core_checksum_func_build_device_set_wake() != 3496 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_vta_mobile_core_checksum_func_build_push_register() != 56991 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_func_build_refresh() != 34815 {
@@ -3089,9 +3419,6 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_func_build_revoke_session() != 1406 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_vta_mobile_core_checksum_func_build_set_device_info() != 52843 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_func_build_whoami() != 28487 {
@@ -3113,6 +3440,12 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_func_parse_authenticate_response() != 23695 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_vta_mobile_core_checksum_func_parse_device_set_wake_response() != 25040 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_vta_mobile_core_checksum_func_parse_push_register_response() != 64039 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_func_parse_refresh_response() != 37853 {

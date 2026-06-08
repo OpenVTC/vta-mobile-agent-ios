@@ -103,6 +103,38 @@ xcodebuild build -scheme VtaMobileAgentApp \
 
 [XcodeGen]: https://github.com/yonaskolb/XcodeGen
 
+## Push wake-up (APNs)
+
+The agent can be **woken by a push** to ratify a step-up while backgrounded,
+instead of holding a live mediator connection. The contentless push is a
+doorbell (push wake-up binding
+[`/binding/push/0.1`](https://trusttasks.org/binding/push/0.1)); the real
+(encrypted) approve-request is pulled from the mediator after the app wakes.
+
+**On-device flow** (`PushRegistration.swift` + `AppDelegate.swift`):
+
+1. *Enable push wake* → request notification authorization + `registerForRemoteNotifications`.
+2. APNs returns the device token → engine `build_push_register` → **gateway**
+   (`push/register`, the token is held by the gateway only) → opaque `WakeHandle`.
+3. Engine `build_device_set_wake` (holder-signed) → **VTA** (`device/set-wake`) —
+   the VTA owns the trigger allowlist and provisions the gateway.
+4. On a delegated step-up the VTA sends `push/wake` → the gateway delivers a
+   contentless APNs push → the app wakes → drains its mediator → **ratifies** the
+   approve-request with the holder key (`receiveStepUpOnce`).
+
+**Apple setup (token-based APNs):**
+
+- An **App ID** for `org.openvtc.vta.agent` with **Push Notifications** enabled,
+  and Xcode **automatic signing** (it provisions the device + push entitlement).
+  The app declares the `aps-environment` entitlement + the `remote-notification`
+  background mode (both via `project.yml`).
+- An **APNs Auth Key (`.p8`)** + its Key ID + your Team ID — these go in the
+  **gateway** (`GATEWAY_APNS_KEY_FILE` / `GATEWAY_APNS_KEY_ID` /
+  `GATEWAY_APNS_TEAM_ID`), never in the app.
+- A **real device** — APNs doesn't deliver remote pushes to the Simulator. Dev
+  builds get a **sandbox** APNs token, so the gateway routes via the APNs sandbox
+  host automatically (the registration's `environment` is `.sandbox`).
+
 ## License
 
 Apache-2.0.

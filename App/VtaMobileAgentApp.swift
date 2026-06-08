@@ -8,6 +8,9 @@ import VtaMobileAgent
 
 @main
 struct VtaMobileAgentApp: App {
+    // UIKit seam for the APNs lifecycle (device token + background pushes).
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     var body: some Scene {
         WindowGroup {
             ContentView()

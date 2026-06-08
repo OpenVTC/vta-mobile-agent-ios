@@ -31,8 +31,19 @@ targets:
       path: App/Info.plist
       properties:
         UILaunchScreen: {}
+        # Wake the app for a contentless (content-available) push so it can drain
+        # its mediator + ratify a step-up in the background.
+        UIBackgroundModes:
+          - remote-notification
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
+    # APNs push entitlement. `development` is the sandbox aps-environment used by
+    # dev/debug builds; Xcode's automatic signing flips it to production for
+    # release/TestFlight. Requires the App ID to have Push Notifications enabled.
+    entitlements:
+      path: App/VtaMobileAgent.entitlements
+      properties:
+        aps-environment: development
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.openvtc.vta.agent
