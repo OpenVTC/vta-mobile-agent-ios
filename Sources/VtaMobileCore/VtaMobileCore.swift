@@ -2235,6 +2235,89 @@ public func FfiConverterTypeUnpackedMessage_lower(_ value: UnpackedMessage) -> R
 }
 
 /**
+ * The VTA's transport endpoints, discovered from its DID document — so a client
+ * can be configured with just the **VTA DID** instead of a hand-typed URL +
+ * mediator.
+ */
+public struct VtaEndpoints {
+    /**
+     * REST base URL, from the `#vta-rest` (`VTARest`) service. `None` if the
+     * VTA advertises no REST service.
+     */
+    public var restBaseUrl: String?
+    /**
+     * Mediator DID, from the `#vta-didcomm` (`DIDCommMessaging`) service's
+     * endpoint `uri`. `None` if the VTA advertises no DIDComm service.
+     */
+    public var mediatorDid: String?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(
+        /* 
+         * REST base URL, from the `#vta-rest` (`VTARest`) service. `None` if the
+         * VTA advertises no REST service.
+         */ restBaseUrl: String?,
+        /* 
+            * Mediator DID, from the `#vta-didcomm` (`DIDCommMessaging`) service's
+            * endpoint `uri`. `None` if the VTA advertises no DIDComm service.
+            */ mediatorDid: String?
+    ) {
+        self.restBaseUrl = restBaseUrl
+        self.mediatorDid = mediatorDid
+    }
+}
+
+extension VtaEndpoints: Equatable, Hashable {
+    public static func == (lhs: VtaEndpoints, rhs: VtaEndpoints) -> Bool {
+        if lhs.restBaseUrl != rhs.restBaseUrl {
+            return false
+        }
+        if lhs.mediatorDid != rhs.mediatorDid {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(restBaseUrl)
+        hasher.combine(mediatorDid)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVtaEndpoints: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VtaEndpoints {
+        return
+            try VtaEndpoints(
+                restBaseUrl: FfiConverterOptionString.read(from: &buf),
+                mediatorDid: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: VtaEndpoints, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.restBaseUrl, into: &buf)
+        FfiConverterOptionString.write(value.mediatorDid, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVtaEndpoints_lift(_ buf: RustBuffer) throws -> VtaEndpoints {
+    return try FfiConverterTypeVtaEndpoints.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVtaEndpoints_lower(_ value: VtaEndpoints) -> RustBuffer {
+    return FfiConverterTypeVtaEndpoints.lower(value)
+}
+
+/**
  * The opaque gateway-issued reference to a device's push channel. Reveals no
  * platform token. `gateway` is a DID (DIDComm gateway) or an https URL (REST
  * gateway); the device conveys this — never the token — to its VTA.
@@ -3341,8 +3424,8 @@ public func parseWhoamiResponse(json: String) throws -> SessionInfo {
  *
  * Used to find a peer's verification keys (to verify a relying party's step-up
  * proof) and key-agreement key (for DIDComm). `did:key` / `did:peer` resolve
- * locally; other methods will require a network-mode resolver config
- * (follow-up). The first async function exported across the FFI boundary.
+ * locally; `did:web` / `did:webvh` resolve over the network. The first async
+ * function exported across the FFI boundary.
  */
 public func resolveDid(did: String) async throws -> String {
     return
@@ -3354,6 +3437,26 @@ public func resolveDid(did: String) async throws -> String {
             completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
             freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
             liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeFfiError.lift
+        )
+}
+
+/**
+ * Resolve a VTA's DID and extract its transport endpoints (`#vta-rest` URL +
+ * `#vta-didcomm` mediator DID). The app uses this to auto-fill the connection
+ * from the DID alone. Resolves `did:key`/`did:peer` offline and `did:webvh`/
+ * `did:web` over the network (same resolver the VTA uses to read service docs).
+ */
+public func resolveVtaEndpoints(did: String) async throws -> VtaEndpoints {
+    return
+        try await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_func_resolve_vta_endpoints(FfiConverterString.lower(did))
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeVtaEndpoints.lift,
             errorHandler: FfiConverterTypeFfiError.lift
         )
 }
@@ -3460,7 +3563,10 @@ private var initializationResult: InitializationResult = {
     if uniffi_vta_mobile_core_checksum_func_parse_whoami_response() != 41103 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_resolve_did() != 11516 {
+    if uniffi_vta_mobile_core_checksum_func_resolve_did() != 1426 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_vta_mobile_core_checksum_func_resolve_vta_endpoints() != 19323 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_func_sign_challenge() != 49514 {
