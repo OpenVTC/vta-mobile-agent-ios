@@ -5,7 +5,8 @@ import VtaMobileAgent
 /// device's holder `did:key` in the VTA ACL, and authenticate over plain REST
 /// (the engine signs the Trust Task documents; the key never leaves the device).
 struct ContentView: View {
-    @StateObject private var model = AgentModel()
+    // Shared with the AppDelegate so APNs callbacks update this same state.
+    @StateObject private var model = AgentModel.shared
 
     var body: some View {
         NavigationStack {
@@ -86,6 +87,23 @@ struct ContentView: View {
                         if let stepUp = model.stepUpStatus {
                             Text(stepUp).font(.footnote)
                         }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("…or be woken by push (APNs) instead of holding a connection:")
+                                .font(.caption).foregroundStyle(.secondary)
+                            TextField("Push gateway URL (https://…)", text: $model.gatewayUrl)
+                                .font(.system(.footnote, design: .monospaced))
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .keyboardType(.URL)
+                            Button(model.pushEnabled ? "Re-register push wake" : "Enable push wake") {
+                                Task { await model.enablePush() }
+                            }
+                            .disabled(model.busy)
+                            if let push = model.pushStatus {
+                                Text(push).font(.footnote)
+                            }
+                        }
                     }
                 }
 
@@ -100,7 +118,10 @@ struct ContentView: View {
             }
             .navigationTitle("VTA Mobile Agent")
         }
-        .onAppear { model.start() }
+        .onAppear {
+            model.start()
+            model.loadPersistedConnection()
+        }
     }
 }
 

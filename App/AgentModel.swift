@@ -1,5 +1,7 @@
 import Foundation
 import SwiftUI
+import UIKit
+import UserNotifications
 import VtaMobileAgent
 import VtaMobileCore
 
@@ -7,8 +9,18 @@ import VtaMobileCore
 /// and drives the REST auth flow on the `VtaMobileAgent` façade.
 @MainActor
 final class AgentModel: ObservableObject {
+    /// Shared instance so the `AppDelegate` (APNs callbacks) and the SwiftUI view
+    /// drive the same state.
+    static let shared = AgentModel()
+
     @Published var vtaURL = ""
     @Published var vtaDid = ""
+    /// Push gateway base URL (HTTPS) — where `push/register` is POSTed.
+    @Published var gatewayUrl = ""
+    /// Status line for the push-wake flow (registration + push-driven drain).
+    @Published var pushStatus: String?
+    /// True once a wake channel is registered (device/set-wake reported capable).
+    @Published var pushEnabled = false
     @Published var holderDid = "(loading…)"
     @Published var status = "Enter your VTA's URL and DID, then authenticate."
     @Published var busy = false
@@ -61,6 +73,7 @@ final class AgentModel: ObservableObject {
                 vtaURL: url, vtaDid: vtaDid.trimmingCharacters(in: .whitespaces), identity: identity)
             tokens = issued
             isAuthenticated = true
+            persistConnection()  // so a push can re-auth on a cold launch
             status = "✅ Authenticated — acr \(issued.acr ?? "—"), "
                 + "access token valid \(issued.expiresIn)s"
         } catch {
@@ -205,5 +218,145 @@ final class AgentModel: ObservableObject {
             return nil
         }
         return url
+    }
+
+    // MARK: Push wake-up (APNs)
+
+    /// Ask for notification permission and register for remote notifications. The
+    /// APNs device token comes back via the `AppDelegate` → `onApnsToken`. (The
+    /// token doesn't require alert permission — silent pushes work regardless —
+    /// but we request it so a live test surfaces a visible banner.)
+    func enablePush() async {
+        do {
+            _ = try await UNUserNotificationCenter.current()
+                .requestAuthorization(options: [.alert, .sound, .badge])
+        } catch {
+            pushStatus = "Notification authorization error: \(error.localizedDescription)"
+        }
+        UIApplication.shared.registerForRemoteNotifications()
+        pushStatus = "Registering for push…"
+    }
+
+    /// APNs handed us a device token — register the wake channel: `push/register`
+    /// to the gateway, then `device/set-wake` to the VTA.
+    func onApnsToken(_ hex: String) async {
+        guard let identity, let tokens, let url = normalizedURL(), !trimmedDid.isEmpty else {
+            pushStatus = "Got APNs token — authenticate (with a VTA DID) first, then enable push."
+            return
+        }
+        let gw = gatewayUrl.trimmingCharacters(in: .whitespaces)
+        guard let gatewayURL = URL(string: gw), gatewayURL.scheme != nil else {
+            pushStatus = "Enter the push gateway URL before enabling push."
+            return
+        }
+        let mediator = mediatorDid.trimmingCharacters(in: .whitespaces)
+        do {
+            let setup = try await VtaMobileAgent.registerApnsWake(
+                apnsToken: hex,
+                topic: Bundle.main.bundleIdentifier ?? "org.openvtc.vta.agent",
+                environment: .sandbox,  // development builds get a sandbox APNs token
+                gatewayURL: gatewayURL,
+                controllerVtaDid: trimmedDid,
+                vtaURL: url,
+                vtaDid: trimmedDid,
+                identity: identity,
+                accessToken: tokens.accessToken,
+                suggestedTriggers: mediator.isEmpty ? [] : [mediator])
+            pushEnabled = setup.pushCapable
+            persistConnection()
+            pushStatus = setup.pushCapable
+                ? "✅ Push wake registered — VTA allowlist: "
+                    + (setup.allowedTriggers.isEmpty ? "—" : setup.allowedTriggers.joined(separator: ", "))
+                : "Push channel cleared."
+        } catch {
+            pushStatus = "❌ Push registration failed — \(error.localizedDescription)"
+        }
+    }
+
+    func onApnsRegisterFailed(_ error: Error) {
+        pushStatus = "❌ APNs registration failed — \(error.localizedDescription)"
+    }
+
+    /// A contentless wake arrived (background push). Establish what we need —
+    /// the holder key (keychain) and a session (re-authenticating if the app was
+    /// relaunched cold) — connect to the mediator, and drain any queued
+    /// approve-requests, ratifying each with the holder key. Returns whether
+    /// anything was approved (maps to the background-fetch result).
+    func handlePushWake() async -> Bool {
+        guard let cfg = Self.loadConnection(), let vtaURLValue = URL(string: cfg.vtaURL) else {
+            pushStatus = "Push received, but no saved VTA connection — open the app and authenticate."
+            return false
+        }
+        do {
+            let id = try identity ?? HolderIdentity.loadOrCreate()
+            identity = id
+            // Reuse a live token if we have one; else re-authenticate (the holder
+            // key is in the keychain, so a cold launch can still elevate).
+            let accessToken: String
+            if let tokens {
+                accessToken = tokens.accessToken
+            } else {
+                let issued = try await VtaMobileAgent.authenticate(
+                    vtaURL: vtaURLValue, vtaDid: cfg.vtaDid, identity: id)
+                tokens = issued
+                accessToken = issued.accessToken
+            }
+            let session = try await id.connectMediator(vtaDid: cfg.vtaDid, mediatorDid: cfg.mediatorDid)
+            defer { Task { await session.shutdown() } }
+            // Drain what's queued: short receives until nothing more arrives.
+            var approvedAny = false
+            for _ in 0..<5 {
+                let outcome = try await VtaMobileAgent.receiveStepUpOnce(
+                    session: session, vtaURL: vtaURLValue, vtaDid: cfg.vtaDid,
+                    identity: id, accessToken: accessToken, timeoutSecs: 5)
+                guard let outcome else { break }
+                approvedAny = true
+                stepUpStatus =
+                    "✅ Approved (push) — session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")"
+            }
+            pushStatus = approvedAny ? "✅ Push wake serviced." : "Woken by push — no pending step-up."
+            return approvedAny
+        } catch {
+            pushStatus = "❌ Push-wake drain failed — \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    // MARK: Connection persistence (so a push can re-auth on a cold launch)
+
+    struct ConnectionConfig {
+        let vtaURL: String
+        let vtaDid: String
+        let mediatorDid: String
+        let gatewayUrl: String
+    }
+
+    private func persistConnection() {
+        let d = UserDefaults.standard
+        d.set(vtaURL.trimmingCharacters(in: .whitespaces), forKey: "pnm.vtaURL")
+        d.set(trimmedDid, forKey: "pnm.vtaDid")
+        d.set(mediatorDid.trimmingCharacters(in: .whitespaces), forKey: "pnm.mediatorDid")
+        d.set(gatewayUrl.trimmingCharacters(in: .whitespaces), forKey: "pnm.gatewayUrl")
+    }
+
+    static func loadConnection() -> ConnectionConfig? {
+        let d = UserDefaults.standard
+        guard let url = d.string(forKey: "pnm.vtaURL"), !url.isEmpty,
+            let did = d.string(forKey: "pnm.vtaDid"), !did.isEmpty,
+            let med = d.string(forKey: "pnm.mediatorDid"), !med.isEmpty
+        else { return nil }
+        return ConnectionConfig(
+            vtaURL: url, vtaDid: did, mediatorDid: med,
+            gatewayUrl: d.string(forKey: "pnm.gatewayUrl") ?? "")
+    }
+
+    /// Prefill the connection fields from the last persisted session, so the UI
+    /// (and a manual re-enable) starts where the operator left off.
+    func loadPersistedConnection() {
+        guard let cfg = Self.loadConnection() else { return }
+        if vtaURL.isEmpty { vtaURL = cfg.vtaURL }
+        if vtaDid.isEmpty { vtaDid = cfg.vtaDid }
+        if mediatorDid.isEmpty { mediatorDid = cfg.mediatorDid }
+        if gatewayUrl.isEmpty { gatewayUrl = cfg.gatewayUrl }
     }
 }
