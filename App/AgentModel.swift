@@ -5,58 +5,226 @@ import UserNotifications
 import VtaMobileAgent
 import VtaMobileCore
 
-/// UI-facing state for the authentication demo. Owns the device holder identity
-/// and drives the REST auth flow on the `VtaMobileAgent` façade.
+/// UI-facing state for the agent. Owns the device holder identity and drives the
+/// REST auth flow + the live DIDComm approver loop on the `VtaMobileAgent` façade.
+///
+/// Design goal: **everything auto and recoverable.** Once configured, the agent
+/// auto-connects on launch, keeps the session alive (token auto-refresh), and
+/// supervises the mediator listen loop with exponential-backoff reconnects, so a
+/// dropped network/VTA recovers without any user action.
 @MainActor
 final class AgentModel: ObservableObject {
-    /// Shared instance so the `AppDelegate` (APNs callbacks) and the SwiftUI view
+    /// Shared instance so the `AppDelegate` (APNs callbacks) and the SwiftUI views
     /// drive the same state.
     static let shared = AgentModel()
 
+    // Configuration (persisted; see ConnectionConfig).
     @Published var vtaURL = ""
     @Published var vtaDid = ""
+    @Published var mediatorDid = ""
     /// Push gateway base URL (HTTPS) — where `push/register` is POSTed.
     @Published var gatewayUrl = ""
-    /// Status line for the push-wake flow (registration + push-driven drain).
-    @Published var pushStatus: String?
-    /// The device's APNs token (hex), once iOS returns it. Surfaced so it can be
-    /// copied into the gateway's `test-wake-apns` helper for a delivery test.
-    @Published var apnsToken: String?
-    /// True once a wake channel is registered (device/set-wake reported capable).
-    @Published var pushEnabled = false
-    @Published var holderDid = "(loading…)"
-    @Published var status = "Enter your VTA's URL and DID, then authenticate."
-    @Published var busy = false
+
+    // Connection / auth state.
     @Published var isAuthenticated = false
-    @Published var whoamiSummary: String?
-    @Published var pastedApproveRequest = ""
-    @Published var stepUpStatus: String?
-    @Published var mediatorDid = ""
+    /// Background connect in progress (distinct from `busy`, which gates explicit
+    /// user actions — auto-connect must not lock the whole UI).
+    @Published var connecting = false
     @Published var listening = false
+    @Published var connectionError: String?
+    @Published var busy = false
+
+    // Surfaced detail.
+    @Published var holderDid = "(loading…)"
+    @Published var status = "Point the agent at your VTA in Settings to get started."
+    @Published var whoamiSummary: String?
+    @Published var stepUpStatus: String?
+
+    // Push wake (APNs).
+    @Published var pushStatus: String?
+    @Published var apnsToken: String?
+    @Published var pushEnabled = false {
+        didSet { UserDefaults.standard.set(pushEnabled, forKey: "pnm.pushEnabled") }
+    }
+
+    // Test-tab scratch.
+    @Published var pastedApproveRequest = ""
+
+    // Activity history (newest first) for the History tab.
+    @Published var events: [AgentEvent] = []
+
+    /// Auto-connect on launch + auto-recover. A manual disconnect clears it; a
+    /// manual Connect re-arms it.
+    @Published var autoConnectEnabled: Bool {
+        didSet { UserDefaults.standard.set(autoConnectEnabled, forKey: "pnm.autoConnect") }
+    }
 
     private var identity: HolderIdentity?
     private var tokens: AuthTokens?
     private var mediatorSession: MediatorSession?
-    private var listenTask: Task<Void, Never>?
+    private var listenSupervisor: Task<Void, Never>?
+    private var keepAliveTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
 
-    private var trimmedDid: String { vtaDid.trimmingCharacters(in: .whitespaces) }
+    private var trimmedDid: String { vtaDid.trimmed }
 
-    /// Load (or first-time create) the device holder key and surface its did:key.
+    init() {
+        autoConnectEnabled = (UserDefaults.standard.object(forKey: "pnm.autoConnect") as? Bool) ?? true
+        pushEnabled = UserDefaults.standard.bool(forKey: "pnm.pushEnabled")
+    }
+
+    // MARK: Derived presentation state
+
+    var isConfigured: Bool { !vtaURL.trimmed.isEmpty && !trimmedDid.isEmpty }
+
+    /// Glanceable status driving the always-visible pill + Home hero.
+    var phase: ConnectionPhase {
+        if !isConfigured { return .notConfigured }
+        if isAuthenticated { return listening ? .live : .connected }
+        if connecting { return .connecting }
+        if connectionError != nil { return .error }
+        return .offline
+    }
+
+    // MARK: Lifecycle
+
+    /// Load (or first-time create) the device holder key, prefill saved config,
+    /// and kick off auto-connect. Safe to call repeatedly (onAppear).
     func start() {
+        if identity == nil {
+            do {
+                let id = try HolderIdentity.loadOrCreate()
+                identity = id
+                holderDid = id.didKey
+            } catch {
+                holderDid = "(key error)"
+                status = "Holder-key error: \(error.localizedDescription)"
+            }
+        }
+        loadPersistedConnection()
+        autoConnectIfConfigured()
+    }
+
+    func autoConnectIfConfigured() {
+        guard autoConnectEnabled, isConfigured, !isAuthenticated, !connecting else { return }
+        Task { await connect(auto: true) }
+    }
+
+    // MARK: Connect / disconnect (auto + recoverable)
+
+    /// Authenticate and bring the agent fully online: refresh-keepalive, the
+    /// supervised mediator listener, and (if previously enabled) push re-arm. A
+    /// manual call re-arms auto-connect; an `auto` call schedules a backoff retry
+    /// on failure.
+    func connect(auto: Bool = false) async {
+        guard let identity, let url = normalizedURL(), isConfigured else {
+            connectionError = "Enter the VTA URL + DID in Settings first."
+            status = connectionError!
+            return
+        }
+        guard !connecting else { return }
+        if !auto { autoConnectEnabled = true }
+        connecting = true
+        connectionError = nil
+        if !auto { status = "Connecting to your VTA…" }
+        defer { connecting = false }
         do {
-            let id = try HolderIdentity.loadOrCreate()
-            identity = id
-            holderDid = id.didKey
+            let issued = try await VtaMobileAgent.authenticate(
+                vtaURL: url, vtaDid: trimmedDid, identity: identity)
+            tokens = issued
+            isAuthenticated = true
+            persistConnection()
+            status = "✅ Connected — acr \(issued.acr ?? "—"), session valid \(issued.expiresIn)s"
+            recordEvent(.auth, "Authenticated", "acr \(issued.acr ?? "—") · token \(issued.expiresIn)s")
+            startKeepAlive()
+            if !mediatorDid.trimmed.isEmpty { await startListening() }
+            if pushEnabled { UIApplication.shared.registerForRemoteNotifications() }
         } catch {
-            holderDid = "(key error)"
-            status = "Holder-key error: \(error.localizedDescription)"
+            isAuthenticated = false
+            connectionError = error.localizedDescription
+            status = "❌ Connection failed — \(error.localizedDescription)"
+            recordEvent(.error, "Connection failed", error.localizedDescription)
+            if auto || autoConnectEnabled { scheduleReconnect() }
         }
     }
 
+    /// Explicit user disconnect: tear everything down and stop auto-recovering
+    /// until the next manual Connect.
+    func disconnect() async {
+        autoConnectEnabled = false
+        reconnectTask?.cancel(); reconnectTask = nil
+        keepAliveTask?.cancel(); keepAliveTask = nil
+        await stopListening()
+        tokens = nil
+        isAuthenticated = false
+        whoamiSummary = nil
+        status = "Disconnected. Tap Connect to bring the agent back online."
+        recordEvent(.info, "Disconnected", nil)
+    }
+
+    /// Background backoff retry after a failed/lost connection.
+    private func scheduleReconnect() {
+        guard autoConnectEnabled, reconnectTask == nil else { return }
+        reconnectTask = Task { [self] in
+            var backoff: UInt64 = 2
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: backoff * 1_000_000_000)
+                backoff = min(backoff * 2, 60)
+                guard autoConnectEnabled, !isAuthenticated else { break }
+                log("Auto-reconnect attempt…")
+                await connect(auto: true)
+                if isAuthenticated { break }
+            }
+            reconnectTask = nil
+        }
+    }
+
+    /// A valid access token, re-authenticating transparently if we don't have one.
+    private func currentAccessToken() async -> String? {
+        if let t = tokens { return t.accessToken }
+        guard let url = normalizedURL(), let identity, !trimmedDid.isEmpty else { return nil }
+        if let issued = try? await VtaMobileAgent.authenticate(
+            vtaURL: url, vtaDid: trimmedDid, identity: identity)
+        {
+            tokens = issued
+            isAuthenticated = true
+            startKeepAlive()
+            return issued.accessToken
+        }
+        return nil
+    }
+
+    /// Re-authenticate ahead of token expiry so the session never lapses.
+    private func startKeepAlive() {
+        keepAliveTask?.cancel()
+        guard let exp = tokens?.expiresIn else { return }
+        let lead = max(30, Int(Double(exp) * 0.8))
+        keepAliveTask = Task { [self] in
+            try? await Task.sleep(nanoseconds: UInt64(lead) * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            await refreshSession()
+        }
+    }
+
+    private func refreshSession() async {
+        guard let url = normalizedURL(), let identity, !trimmedDid.isEmpty else { return }
+        do {
+            let issued = try await VtaMobileAgent.authenticate(
+                vtaURL: url, vtaDid: trimmedDid, identity: identity)
+            tokens = issued
+            isAuthenticated = true
+            log("Session refreshed (acr \(issued.acr ?? "—"))")
+            startKeepAlive()
+        } catch {
+            log("Session refresh failed: \(error.localizedDescription)")
+            scheduleReconnect()
+        }
+    }
+
+    // MARK: VTA discovery
+
     /// Resolve the VTA's DID and fill the REST URL + mediator DID from its DID
-    /// document, so the operator enters only the DID. Both fields stay editable
-    /// as a fallback when discovery is partial (the VTA advertises one service
-    /// but not the other).
+    /// document, so the operator enters only the DID.
     func resolveFromDid() async {
         let did = trimmedDid
         guard !did.isEmpty else {
@@ -82,53 +250,25 @@ final class AgentModel: ObservableObject {
                 ? "Resolved the DID, but it advertises no #vta-rest / #vta-didcomm "
                     + "service — enter the URL / mediator manually."
                 : "✅ Filled \(filled.joined(separator: " + ")) from the DID."
+            if filled.contains("URL") { persistConnection() }
         } catch {
             status = "❌ Couldn't resolve \(did) — \(error.localizedDescription)"
         }
     }
 
-    func authenticate() async {
-        guard let identity else {
-            status = "Holder key not ready."
-            return
-        }
-        guard let url = normalizedURL() else {
-            status = "Enter a valid VTA URL (e.g. http://192.168.1.10:8100)."
-            return
-        }
-        guard !vtaDid.trimmingCharacters(in: .whitespaces).isEmpty else {
-            status = "Enter the VTA's DID (the document recipient)."
-            return
-        }
-
-        busy = true
-        whoamiSummary = nil
-        status = "Authenticating…"
-        defer { busy = false }
-        do {
-            let issued = try await VtaMobileAgent.authenticate(
-                vtaURL: url, vtaDid: vtaDid.trimmingCharacters(in: .whitespaces), identity: identity)
-            tokens = issued
-            isAuthenticated = true
-            persistConnection()  // so a push can re-auth on a cold launch
-            status = "✅ Authenticated — acr \(issued.acr ?? "—"), "
-                + "access token valid \(issued.expiresIn)s"
-        } catch {
-            isAuthenticated = false
-            status = "❌ Authentication failed — \(error.localizedDescription)"
-        }
-    }
+    // MARK: Session introspection
 
     func whoami() async {
-        guard let identity, let tokens, let url = normalizedURL() else { return }
+        guard let identity, let url = normalizedURL() else { return }
+        guard let token = await currentAccessToken() else {
+            whoamiSummary = "Not connected."
+            return
+        }
         busy = true
         defer { busy = false }
         do {
             let info = try await VtaMobileAgent.whoami(
-                vtaURL: url,
-                vtaDid: vtaDid.trimmingCharacters(in: .whitespaces),
-                identity: identity,
-                accessToken: tokens.accessToken)
+                vtaURL: url, vtaDid: trimmedDid, identity: identity, accessToken: token)
             let roles = info.roles.isEmpty ? "—" : info.roles.joined(separator: ", ")
             whoamiSummary = "session \(info.sessionId)\nacr \(info.acr ?? "—") · roles: \(roles)"
         } catch {
@@ -136,11 +276,15 @@ final class AgentModel: ObservableObject {
         }
     }
 
+    // MARK: Step-up (test surfaces)
+
     /// Self-contained demo: provoke + approve a step-up on this device's own
     /// session, then reflect the elevated `acr` via whoami.
     func demoStepUp() async {
-        guard let identity, let tokens, let url = normalizedURL(), !trimmedDid.isEmpty else {
-            stepUpStatus = "Authenticate (with a VTA DID) first."
+        guard let identity, let url = normalizedURL(), !trimmedDid.isEmpty,
+            let token = await currentAccessToken()
+        else {
+            stepUpStatus = "Connect first."
             return
         }
         busy = true
@@ -148,9 +292,10 @@ final class AgentModel: ObservableObject {
         stepUpStatus = "Stepping up this session…"
         do {
             let outcome = try await VtaMobileAgent.demoSelfStepUp(
-                vtaURL: url, vtaDid: trimmedDid, identity: identity, accessToken: tokens.accessToken)
+                vtaURL: url, vtaDid: trimmedDid, identity: identity, accessToken: token)
             stepUpStatus = "✅ Elevated to \(outcome.grantedAcr ?? "—")"
-            await whoami() // live session now reports the elevated acr
+            recordEvent(.approval, "Self step-up", "→ \(outcome.grantedAcr ?? "—")")
+            await whoami()
         } catch {
             stepUpStatus = "❌ Step-up failed — \(error.localizedDescription)"
         }
@@ -159,11 +304,13 @@ final class AgentModel: ObservableObject {
     /// Proxied approver: ratify a step-up whose approve-request was relayed here
     /// from another device (paste the VTA `403` body or the bare document).
     func approvePasted() async {
-        guard let identity, let tokens, let url = normalizedURL(), !trimmedDid.isEmpty else {
-            stepUpStatus = "Authenticate (with a VTA DID) first."
+        guard let identity, let url = normalizedURL(), !trimmedDid.isEmpty,
+            let token = await currentAccessToken()
+        else {
+            stepUpStatus = "Connect first."
             return
         }
-        let request = pastedApproveRequest.trimmingCharacters(in: .whitespacesAndNewlines)
+        let request = pastedApproveRequest.trimmed
         guard !request.isEmpty else {
             stepUpStatus = "Paste an approve-request to ratify."
             return
@@ -174,83 +321,94 @@ final class AgentModel: ObservableObject {
         do {
             let outcome = try await VtaMobileAgent.approveStepUp(
                 approveRequest: request, vtaURL: url, vtaDid: trimmedDid,
-                identity: identity, accessToken: tokens.accessToken)
+                identity: identity, accessToken: token)
             stepUpStatus = "✅ Approved — session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")"
+            recordEvent(.approval, "Approved (pasted)",
+                "session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")")
+            pastedApproveRequest = ""
         } catch {
             stepUpStatus = "❌ Approve failed — \(error.localizedDescription)"
         }
     }
 
-    /// Live proxied approver: connect to the holder's mediator and service
-    /// VTA-pushed step-up approve-requests as they arrive (no copy-paste). Toggle
-    /// off to disconnect. This is the end-to-end path — the VTA addresses an
-    /// approve-request to this device's DID over DIDComm, the mediator delivers
-    /// it, and we ratify it automatically with the holder key.
-    func toggleMediatorListen() async {
-        if listening {
-            await stopMediatorListen()
-            return
-        }
-        guard let identity, let tokens, let url = normalizedURL(), !trimmedDid.isEmpty else {
-            stepUpStatus = "Authenticate (with a VTA DID) first."
-            return
-        }
-        let mediator = mediatorDid.trimmingCharacters(in: .whitespaces)
-        guard !mediator.isEmpty else {
-            stepUpStatus = "Enter the mediator DID to listen on."
-            return
-        }
+    // MARK: Live mediator approver (supervised, auto-reconnecting)
 
-        busy = true
-        stepUpStatus = "Connecting to mediator…"
-        do {
-            let session = try await identity.connectMediator(
-                vtaDid: trimmedDid, mediatorDid: mediator)
-            mediatorSession = session
-            listening = true
-            stepUpStatus = "👂 Listening for step-up requests…"
-            let accessToken = tokens.accessToken
-            // Drive the receive loop off the main actor; each `receiveStepUpOnce`
-            // waits up to its timeout then loops, ratifying any approve-request.
-            listenTask = Task { [weak self] in
-                while !Task.isCancelled {
-                    do {
-                        let outcome = try await VtaMobileAgent.receiveStepUpOnce(
-                            session: session, vtaURL: url, vtaDid: self?.trimmedDid ?? "",
-                            identity: identity, accessToken: accessToken)
-                        guard let self else { return }
-                        if let outcome {
-                            self.stepUpStatus =
-                                "✅ Approved — session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")"
-                        }
-                    } catch {
-                        guard let self else { return }
-                        if !Task.isCancelled {
-                            self.stepUpStatus = "❌ Listener error — \(error.localizedDescription)"
-                        }
-                        return  // connection dropped; require an explicit reconnect
-                    }
-                }
-            }
-        } catch {
-            stepUpStatus = "❌ Mediator connect failed — \(error.localizedDescription)"
+    func toggleMediatorListen() async {
+        if listening || listenSupervisor != nil {
+            await stopListening()
+        } else {
+            await startListening()
         }
-        busy = false
     }
 
-    private func stopMediatorListen() async {
-        listenTask?.cancel()
-        listenTask = nil
+    /// Connect to the holder's mediator and service VTA-pushed step-up
+    /// approve-requests as they arrive, auto-reconnecting with backoff on any
+    /// drop. Idempotent.
+    func startListening() async {
+        guard listenSupervisor == nil else { return }
+        guard let identity, let url = normalizedURL(), !trimmedDid.isEmpty else {
+            stepUpStatus = "Connect first."
+            return
+        }
+        let mediator = mediatorDid.trimmed
+        guard !mediator.isEmpty else {
+            stepUpStatus = "Set the mediator DID in Settings to listen."
+            return
+        }
+        let did = trimmedDid
+        listenSupervisor = Task { [self] in
+            var backoff: UInt64 = 1
+            while !Task.isCancelled {
+                guard let token = await currentAccessToken() else {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    continue
+                }
+                do {
+                    let session = try await identity.connectMediator(
+                        vtaDid: did, mediatorDid: mediator)
+                    mediatorSession = session
+                    listening = true
+                    connectionError = nil
+                    stepUpStatus = "👂 Listening for step-up requests…"
+                    backoff = 1
+                    while !Task.isCancelled {
+                        let outcome = try await VtaMobileAgent.receiveStepUpOnce(
+                            session: session, vtaURL: url, vtaDid: did,
+                            identity: identity, accessToken: token)
+                        if let outcome {
+                            stepUpStatus =
+                                "✅ Approved — session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")"
+                            recordEvent(.approval, "Approved (live)",
+                                "session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")")
+                        }
+                    }
+                    await session.shutdown()
+                } catch {
+                    if Task.isCancelled { break }
+                    listening = false
+                    stepUpStatus = "Reconnecting to mediator…"
+                    log("Mediator listen dropped: \(error.localizedDescription); reconnecting")
+                    try? await Task.sleep(nanoseconds: backoff * 1_000_000_000)
+                    backoff = min(backoff * 2, 30)
+                }
+            }
+            listening = false
+        }
+    }
+
+    func stopListening() async {
+        listenSupervisor?.cancel()
+        listenSupervisor = nil
         if let session = mediatorSession {
             await session.shutdown()
         }
         mediatorSession = nil
         listening = false
-        stepUpStatus = "Stopped listening."
+        if isAuthenticated { stepUpStatus = "Stopped listening." }
     }
 
     private func normalizedURL() -> URL? {
-        let trimmed = vtaURL.trimmingCharacters(in: .whitespaces)
+        let trimmed = vtaURL.trimmed
         guard !trimmed.isEmpty, let url = URL(string: trimmed), url.scheme != nil else {
             return nil
         }
@@ -260,9 +418,7 @@ final class AgentModel: ObservableObject {
     // MARK: Push wake-up (APNs)
 
     /// Ask for notification permission and register for remote notifications. The
-    /// APNs device token comes back via the `AppDelegate` → `onApnsToken`. (The
-    /// token doesn't require alert permission — silent pushes work regardless —
-    /// but we request it so a live test surfaces a visible banner.)
+    /// APNs device token comes back via the `AppDelegate` → `onApnsToken`.
     func enablePush() async {
         do {
             _ = try await UNUserNotificationCenter.current()
@@ -277,31 +433,31 @@ final class AgentModel: ObservableObject {
     /// APNs handed us a device token — register the wake channel: `push/register`
     /// to the gateway, then `device/set-wake` to the VTA.
     func onApnsToken(_ hex: String) async {
-        // Surface the token first, unconditionally — it's useful for the
-        // `test-wake-apns` delivery check even before a VTA is connected.
         apnsToken = hex
         print("[vta-agent] APNs device token: \(hex)")
-        guard let identity, let tokens, let url = normalizedURL(), !trimmedDid.isEmpty else {
-            pushStatus = "Got APNs token — authenticate (with a VTA DID) first, then enable push."
+        guard let identity, let url = normalizedURL(), !trimmedDid.isEmpty,
+            let token = await currentAccessToken()
+        else {
+            pushStatus = "Got APNs token — connect to a VTA first, then enable push."
             return
         }
-        let gw = gatewayUrl.trimmingCharacters(in: .whitespaces)
+        let gw = gatewayUrl.trimmed
         guard let gatewayURL = URL(string: gw), gatewayURL.scheme != nil else {
-            pushStatus = "Enter the push gateway URL before enabling push."
+            pushStatus = "Set the push gateway URL in Settings before enabling push."
             return
         }
-        let mediator = mediatorDid.trimmingCharacters(in: .whitespaces)
+        let mediator = mediatorDid.trimmed
         do {
             let setup = try await VtaMobileAgent.registerApnsWake(
                 apnsToken: hex,
                 topic: Bundle.main.bundleIdentifier ?? "org.openvtc.vta.agent",
-                environment: .sandbox,  // development builds get a sandbox APNs token
+                environment: .sandbox,
                 gatewayURL: gatewayURL,
                 controllerVtaDid: trimmedDid,
                 vtaURL: url,
                 vtaDid: trimmedDid,
                 identity: identity,
-                accessToken: tokens.accessToken,
+                accessToken: token,
                 suggestedTriggers: mediator.isEmpty ? [] : [mediator])
             pushEnabled = setup.pushCapable
             persistConnection()
@@ -309,6 +465,8 @@ final class AgentModel: ObservableObject {
                 ? "✅ Push wake registered — VTA allowlist: "
                     + (setup.allowedTriggers.isEmpty ? "—" : setup.allowedTriggers.joined(separator: ", "))
                 : "Push channel cleared."
+            recordEvent(.push, "Push wake registered",
+                setup.allowedTriggers.isEmpty ? nil : "triggers: \(setup.allowedTriggers.joined(separator: ", "))")
         } catch {
             pushStatus = "❌ Push registration failed — \(error.localizedDescription)"
         }
@@ -318,21 +476,16 @@ final class AgentModel: ObservableObject {
         pushStatus = "❌ APNs registration failed — \(error.localizedDescription)"
     }
 
-    /// A contentless wake arrived (background push). Establish what we need —
-    /// the holder key (keychain) and a session (re-authenticating if the app was
-    /// relaunched cold) — connect to the mediator, and drain any queued
-    /// approve-requests, ratifying each with the holder key. Returns whether
-    /// anything was approved (maps to the background-fetch result).
+    /// A contentless wake arrived (background push). Re-establish what we need and
+    /// drain any queued approve-requests, ratifying each with the holder key.
     func handlePushWake() async -> Bool {
         guard let cfg = Self.loadConnection(), let vtaURLValue = URL(string: cfg.vtaURL) else {
-            pushStatus = "Push received, but no saved VTA connection — open the app and authenticate."
+            pushStatus = "Push received, but no saved VTA connection — open the app and connect."
             return false
         }
         do {
             let id = try identity ?? HolderIdentity.loadOrCreate()
             identity = id
-            // Reuse a live token if we have one; else re-authenticate (the holder
-            // key is in the keychain, so a cold launch can still elevate).
             let accessToken: String
             if let tokens {
                 accessToken = tokens.accessToken
@@ -342,9 +495,9 @@ final class AgentModel: ObservableObject {
                 tokens = issued
                 accessToken = issued.accessToken
             }
-            let session = try await id.connectMediator(vtaDid: cfg.vtaDid, mediatorDid: cfg.mediatorDid)
+            let session = try await id.connectMediator(
+                vtaDid: cfg.vtaDid, mediatorDid: cfg.mediatorDid)
             defer { Task { await session.shutdown() } }
-            // Drain what's queued: short receives until nothing more arrives.
             var approvedAny = false
             for _ in 0..<5 {
                 let outcome = try await VtaMobileAgent.receiveStepUpOnce(
@@ -354,6 +507,8 @@ final class AgentModel: ObservableObject {
                 approvedAny = true
                 stepUpStatus =
                     "✅ Approved (push) — session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")"
+                recordEvent(.push, "Approved via push wake",
+                    "session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")")
             }
             pushStatus = approvedAny ? "✅ Push wake serviced." : "Woken by push — no pending step-up."
             return approvedAny
@@ -363,7 +518,19 @@ final class AgentModel: ObservableObject {
         }
     }
 
-    // MARK: Connection persistence (so a push can re-auth on a cold launch)
+    // MARK: History + logging
+
+    private func recordEvent(_ kind: AgentEvent.Kind, _ title: String, _ detail: String?) {
+        events.insert(AgentEvent(kind: kind, title: title, detail: detail), at: 0)
+        if events.count > 200 { events.removeLast(events.count - 200) }
+        log("[\(kind)] \(title)\(detail.map { " — \($0)" } ?? "")")
+    }
+
+    func log(_ message: String) {
+        LogStore.shared.append("[agent] \(message)")
+    }
+
+    // MARK: Connection persistence
 
     struct ConnectionConfig {
         let vtaURL: String
@@ -374,11 +541,15 @@ final class AgentModel: ObservableObject {
 
     private func persistConnection() {
         let d = UserDefaults.standard
-        d.set(vtaURL.trimmingCharacters(in: .whitespaces), forKey: "pnm.vtaURL")
+        d.set(vtaURL.trimmed, forKey: "pnm.vtaURL")
         d.set(trimmedDid, forKey: "pnm.vtaDid")
-        d.set(mediatorDid.trimmingCharacters(in: .whitespaces), forKey: "pnm.mediatorDid")
-        d.set(gatewayUrl.trimmingCharacters(in: .whitespaces), forKey: "pnm.gatewayUrl")
+        d.set(mediatorDid.trimmed, forKey: "pnm.mediatorDid")
+        d.set(gatewayUrl.trimmed, forKey: "pnm.gatewayUrl")
     }
+
+    /// Persist the current config without requiring a connection (so edits in
+    /// Settings survive even before the first successful auth).
+    func saveConfig() { persistConnection() }
 
     static func loadConnection() -> ConnectionConfig? {
         let d = UserDefaults.standard
@@ -391,13 +562,34 @@ final class AgentModel: ObservableObject {
             gatewayUrl: d.string(forKey: "pnm.gatewayUrl") ?? "")
     }
 
-    /// Prefill the connection fields from the last persisted session, so the UI
-    /// (and a manual re-enable) starts where the operator left off.
+    /// Prefill the connection fields from the last persisted session.
     func loadPersistedConnection() {
-        guard let cfg = Self.loadConnection() else { return }
-        if vtaURL.isEmpty { vtaURL = cfg.vtaURL }
-        if vtaDid.isEmpty { vtaDid = cfg.vtaDid }
-        if mediatorDid.isEmpty { mediatorDid = cfg.mediatorDid }
-        if gatewayUrl.isEmpty { gatewayUrl = cfg.gatewayUrl }
+        let d = UserDefaults.standard
+        if vtaURL.isEmpty, let v = d.string(forKey: "pnm.vtaURL") { vtaURL = v }
+        if vtaDid.isEmpty, let v = d.string(forKey: "pnm.vtaDid") { vtaDid = v }
+        if mediatorDid.isEmpty, let v = d.string(forKey: "pnm.mediatorDid") { mediatorDid = v }
+        if gatewayUrl.isEmpty, let v = d.string(forKey: "pnm.gatewayUrl") { gatewayUrl = v }
     }
+}
+
+/// A user-facing activity entry for the History tab.
+struct AgentEvent: Identifiable {
+    enum Kind: CustomStringConvertible {
+        case approval, auth, push, info, error
+        var description: String {
+            switch self {
+            case .approval: return "approval"
+            case .auth: return "auth"
+            case .push: return "push"
+            case .info: return "info"
+            case .error: return "error"
+            }
+        }
+    }
+
+    let id = UUID()
+    let date = Date()
+    let kind: Kind
+    let title: String
+    let detail: String?
 }

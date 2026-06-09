@@ -91,7 +91,31 @@ open VtaMobileAgentApp.xcodeproj
 
 Pick an **installed** iPhone simulator (the latest-runtime one — e.g. iPhone 17
 — is safest; `name=iPhone 16` only resolves if a matching OS is installed) and
-Run. The screen shows the live engine version via `engineInfo()` across the FFI.
+Run.
+
+### App UI
+
+The app is organised as a bottom **tab bar** so each context is focused:
+
+- **Home** — at-a-glance status hero + the single primary action. Once
+  configured the agent runs itself; this screen just reflects that.
+- **Test** — manual surfaces for development: self step-up, *who am I*, live
+  mediator listening, pasted ratification, push-wake registration.
+- **History** — a chronological, color-coded record of authentications,
+  approvals (live / pasted / push), and errors.
+- **Logs** — the engine + app `stdout`/`stderr` stream captured in-app
+  (`LogStore`), with copy/clear — diagnose on-device without Xcode attached.
+- **Settings** — all configuration (VTA DID/URL/mediator/gateway, auto-connect),
+  the device identity, and the **theme picker**.
+
+**Everything is auto and recoverable.** Once a VTA is configured the agent
+auto-connects on launch, refreshes its token ahead of expiry, and supervises the
+mediator listener with exponential-backoff reconnects — a dropped network/VTA
+recovers with no user action. A connection **status pill** is always visible in
+the nav bar on every tab.
+
+**Themes** (`Theme.swift`) are user-selectable at runtime (Vibrant / Neon /
+Pastel / Minimal) and persisted; the choice restyles the whole app live.
 
 CLI build/run without opening Xcode:
 
