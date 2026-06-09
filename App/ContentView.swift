@@ -1,144 +1,42 @@
 import SwiftUI
 import VtaMobileAgent
 
-/// The agent's authentication demo screen: point it at a VTA, enroll this
-/// device's holder `did:key` in the VTA ACL, and authenticate over plain REST
-/// (the engine signs the Trust Task documents; the key never leaves the device).
+/// Root of the app: a bottom tab bar that splits the agent into focused
+/// contexts — Home (status), Test, History, Logs, and Settings (config). The
+/// selected theme is applied app-wide and the connection status is always
+/// visible via the nav-bar pill on every tab.
 struct ContentView: View {
-    // Shared with the AppDelegate so APNs callbacks update this same state.
     @StateObject private var model = AgentModel.shared
+    @StateObject private var themeManager = ThemeManager.shared
+    @StateObject private var router = AppRouter()
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section("This device") {
-                    LabeledContent("Engine") { Text(VtaMobileAgent.engineSummary()) }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Holder did:key").font(.caption).foregroundStyle(.secondary)
-                        Text(model.holderDid)
-                            .font(.system(.footnote, design: .monospaced))
-                            .textSelection(.enabled)
-                        Text("Enroll it in the VTA:\npnm acl create --did <above> --role admin")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Section("VTA") {
-                    TextField("VTA DID (did:webvh:… / did:web:…)", text: $model.vtaDid)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    Button("Resolve endpoints from DID") {
-                        Task { await model.resolveFromDid() }
-                    }
-                    .disabled(model.busy)
-                    Text("Resolves the DID's #vta-rest + #vta-didcomm services to fill the URL "
-                        + "and mediator below. Edit them manually if the VTA advertises neither.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                    TextField("URL (auto-filled from the DID; editable)", text: $model.vtaURL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .keyboardType(.URL)
-                }
-
-                Section {
-                    Button(action: { Task { await model.authenticate() } }) {
-                        HStack {
-                            Text("Authenticate")
-                            if model.busy {
-                                Spacer()
-                                ProgressView()
-                            }
-                        }
-                    }
-                    .disabled(model.busy)
-
-                    if model.isAuthenticated {
-                        Button("Who am I?") { Task { await model.whoami() } }
-                            .disabled(model.busy)
-                    }
-                }
-
-                if model.isAuthenticated {
-                    Section("AAL2 step-up approver") {
-                        Button("Step up this session (demo)") {
-                            Task { await model.demoStepUp() }
-                        }
-                        .disabled(model.busy)
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("…or listen on a mediator and approve requests live:")
-                                .font(.caption).foregroundStyle(.secondary)
-                            TextField("Mediator DID (did:web:… / did:webvh:…)", text: $model.mediatorDid)
-                                .font(.system(.footnote, design: .monospaced))
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                            Button(model.listening ? "Stop listening" : "Listen for step-ups") {
-                                Task { await model.toggleMediatorListen() }
-                            }
-                            .disabled(model.busy && !model.listening)
-                        }
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("…or ratify a request relayed from another device:")
-                                .font(.caption).foregroundStyle(.secondary)
-                            TextEditor(text: $model.pastedApproveRequest)
-                                .font(.system(.caption2, design: .monospaced))
-                                .frame(height: 90)
-                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
-                            Button("Approve pasted request") {
-                                Task { await model.approvePasted() }
-                            }
-                            .disabled(model.busy)
-                        }
-                        if let stepUp = model.stepUpStatus {
-                            Text(stepUp).font(.footnote)
-                        }
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("…or be woken by push (APNs) instead of holding a connection:")
-                                .font(.caption).foregroundStyle(.secondary)
-                            TextField("Push gateway URL (https://…)", text: $model.gatewayUrl)
-                                .font(.system(.footnote, design: .monospaced))
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .keyboardType(.URL)
-                            Button(model.pushEnabled ? "Re-register push wake" : "Enable push wake") {
-                                Task { await model.enablePush() }
-                            }
-                            .disabled(model.busy)
-                            if let push = model.pushStatus {
-                                Text(push).font(.footnote)
-                            }
-                            if let token = model.apnsToken {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("APNs token (for `test-wake-apns`):")
-                                        .font(.caption2).foregroundStyle(.secondary)
-                                    Text(token)
-                                        .font(.system(.caption2, design: .monospaced))
-                                        .textSelection(.enabled)
-                                        .lineLimit(3)
-                                        .truncationMode(.middle)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Section("Status") {
-                    Text(model.status).font(.footnote)
-                    if let whoami = model.whoamiSummary {
-                        Text(whoami)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .navigationTitle("VTA Mobile Agent")
+        TabView(selection: $router.tab) {
+            HomeTab()
+                .tabItem { Label("Home", systemImage: "house.fill") }
+                .tag(Tab.home)
+            TestTab()
+                .tabItem { Label("Test", systemImage: "bolt.fill") }
+                .tag(Tab.test)
+            HistoryTab()
+                .tabItem { Label("History", systemImage: "clock.fill") }
+                .tag(Tab.history)
+            LogsTab()
+                .tabItem { Label("Logs", systemImage: "terminal.fill") }
+                .tag(Tab.logs)
+            SettingsTab()
+                .tabItem { Label("Settings", systemImage: "gearshape.fill") }
+                .tag(Tab.settings)
         }
+        .tint(themeManager.theme.accent)
+        .environment(\.theme, themeManager.theme)
+        .environmentObject(model)
+        .environmentObject(themeManager)
+        .environmentObject(router)
+        .preferredColorScheme(themeManager.theme.preferredColorScheme)
         .onAppear {
+            LogStore.shared.start()
             model.start()
-            model.loadPersistedConnection()
         }
     }
 }
