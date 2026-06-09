@@ -25,13 +25,25 @@ final class LogStore: ObservableObject {
     private var savedOut: Int32 = -1
     private var savedErr: Int32 = -1
     private var pending = Data()
+    /// Retained for the lifetime of the process. If the `Pipe` deallocated, its
+    /// read end would close and the next write to the redirected stdout/stderr
+    /// would raise **SIGPIPE (signal 13)** and kill the app — which is exactly
+    /// what happened on device. Holding it keeps the reader alive.
+    private var pipe: Pipe?
 
     /// Begin capturing. Idempotent; call once from the app on launch.
     func start() {
         guard !started else { return }
         started = true
 
+        // Hard safety net: a write to a pipe whose reader has gone away must
+        // never terminate the process. Without this, any stdout/stderr write
+        // after the redirect below can crash the app with SIGPIPE (13). We read
+        // the pipe ourselves, so EPIPE is simply ignored.
+        signal(SIGPIPE, SIG_IGN)
+
         let pipe = Pipe()
+        self.pipe = pipe  // retain — see the property note above
         let writeFD = pipe.fileHandleForWriting.fileDescriptor
 
         // Keep originals so output is mirrored back to the real console.
