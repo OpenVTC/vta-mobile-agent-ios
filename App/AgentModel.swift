@@ -50,6 +50,11 @@ final class AgentModel: ObservableObject {
     // Test-tab scratch.
     @Published var pastedApproveRequest = ""
 
+    /// An incoming step-up awaiting the operator's Approve/Deny (an AI ask that
+    /// carries a structured authorization context — not auto-ratified). Drives
+    /// the review sheet. `nil` when nothing is pending.
+    @Published var pendingApproval: PendingApproval?
+
     // Activity history (newest first) for the History tab.
     @Published var events: [AgentEvent] = []
 
@@ -331,6 +336,93 @@ final class AgentModel: ObservableObject {
         }
     }
 
+    // MARK: Human-in-the-loop review gate
+
+    /// Route an incoming step-up: an AI ask carrying a structured authorization
+    /// context is surfaced for the operator's consent; a plain login-elevation
+    /// step-up (no context) is auto-ratified.
+    private func handleIncomingStepUp(
+        doc: String, url: URL, did: String, token: String, identity: HolderIdentity
+    ) async {
+        do {
+            let review = try VtaMobileAgent.inspect(approveRequest: doc)
+            if VtaMobileAgent.requiresReview(review) {
+                pendingApproval = PendingApproval(rawDoc: doc, review: review)
+                stepUpStatus = "🔔 Approval requested — review it"
+                notifyPendingApproval(review)
+            } else {
+                let outcome = try await VtaMobileAgent.approveStepUp(
+                    approveRequest: doc, vtaURL: url, vtaDid: did,
+                    identity: identity, accessToken: token)
+                stepUpStatus =
+                    "✅ Approved — session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")"
+                recordEvent(.approval, "Approved (live)",
+                    "session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")")
+            }
+        } catch {
+            stepUpStatus = "❌ Step-up failed — \(error.localizedDescription)"
+        }
+    }
+
+    /// Approve the pending ask (Face ID fires as the enclave key signs). Fetches
+    /// a fresh token — the ask may have sat a while.
+    func approvePending() async {
+        guard let pending = pendingApproval, let identity, let url = normalizedURL(),
+            !trimmedDid.isEmpty, let token = await currentAccessToken()
+        else { return }
+        busy = true
+        defer { busy = false }
+        do {
+            let outcome = try await VtaMobileAgent.approveStepUp(
+                approveRequest: pending.rawDoc, vtaURL: url, vtaDid: trimmedDid,
+                identity: identity, accessToken: token)
+            stepUpStatus = "✅ Approved — \(pending.summary)"
+            recordEvent(.approval, "Approved", pending.summary)
+            pendingApproval = nil
+        } catch {
+            stepUpStatus = "❌ Approve failed — \(error.localizedDescription)"
+        }
+    }
+
+    /// Decline the pending ask — a holder-signed refusal the VTA audits.
+    func denyPending(reason: String = "Declined by the operator") async {
+        guard let pending = pendingApproval, let identity, let url = normalizedURL(),
+            !trimmedDid.isEmpty, let token = await currentAccessToken()
+        else { return }
+        busy = true
+        defer { busy = false }
+        do {
+            _ = try await VtaMobileAgent.denyStepUp(
+                approveRequest: pending.rawDoc, reason: reason, vtaURL: url,
+                vtaDid: trimmedDid, identity: identity, accessToken: token)
+            stepUpStatus = "🚫 Declined — \(pending.summary)"
+            recordEvent(.error, "Declined", pending.summary)
+            pendingApproval = nil
+        } catch {
+            stepUpStatus = "❌ Decline failed — \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: Actionable approval notification
+
+    static let approvalCategoryId = "CIERGE_APPROVAL"
+    static let approveActionId = "CIERGE_APPROVE"
+    static let denyActionId = "CIERGE_DENY"
+
+    /// Post a local notification for a pending approval, with inline Approve/Deny
+    /// actions (registered by the `AppDelegate`) so the operator can act from the
+    /// lock screen without opening the app.
+    func notifyPendingApproval(_ review: VtaMobileAgent.StepUpReview) {
+        let content = UNMutableNotificationContent()
+        content.title = "Authorization requested"
+        content.body = review.authorizationContext?.summary ?? review.reason
+        content.categoryIdentifier = Self.approvalCategoryId
+        content.interruptionLevel = .timeSensitive
+        content.sound = .default
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: "pending-approval", content: content, trigger: nil))
+    }
+
     // MARK: Live mediator approver (supervised, auto-reconnecting)
 
     func toggleMediatorListen() async {
@@ -372,15 +464,13 @@ final class AgentModel: ObservableObject {
                     stepUpStatus = "👂 Listening for step-up requests…"
                     backoff = 1
                     while !Task.isCancelled {
-                        let outcome = try await VtaMobileAgent.receiveStepUpOnce(
-                            session: session, vtaURL: url, vtaDid: did,
-                            identity: identity, accessToken: token)
-                        if let outcome {
-                            stepUpStatus =
-                                "✅ Approved — session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")"
-                            recordEvent(.approval, "Approved (live)",
-                                "session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")")
-                        }
+                        // Pull the next request WITHOUT acting — so an AI ask that
+                        // carries a structured authorization context is surfaced
+                        // for the operator's Approve/Deny instead of auto-ratified.
+                        guard let doc = try await VtaMobileAgent.nextApproveRequest(session: session)
+                        else { continue }  // timeout / not a step-up → keep listening
+                        await handleIncomingStepUp(
+                            doc: doc, url: url, did: did, token: token, identity: identity)
                     }
                     await session.shutdown()
                 } catch {
@@ -498,20 +588,22 @@ final class AgentModel: ObservableObject {
             let session = try await id.connectMediator(
                 vtaDid: cfg.vtaDid, mediatorDid: cfg.mediatorDid)
             defer { Task { await session.shutdown() } }
-            var approvedAny = false
+            var handledAny = false
             for _ in 0..<5 {
-                let outcome = try await VtaMobileAgent.receiveStepUpOnce(
-                    session: session, vtaURL: vtaURLValue, vtaDid: cfg.vtaDid,
-                    identity: id, accessToken: accessToken, timeoutSecs: 5)
-                guard let outcome else { break }
-                approvedAny = true
-                stepUpStatus =
-                    "✅ Approved (push) — session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")"
-                recordEvent(.push, "Approved via push wake",
-                    "session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")")
+                guard
+                    let doc = try await VtaMobileAgent.nextApproveRequest(
+                        session: session, timeoutSecs: 5)
+                else { break }
+                handledAny = true
+                // Same gate as the live listener: an AI ask surfaces for consent
+                // (posts the actionable notification — ideal for a background
+                // wake); a plain login step-up auto-ratifies.
+                await handleIncomingStepUp(
+                    doc: doc, url: vtaURLValue, did: cfg.vtaDid,
+                    token: accessToken, identity: id)
             }
-            pushStatus = approvedAny ? "✅ Push wake serviced." : "Woken by push — no pending step-up."
-            return approvedAny
+            pushStatus = handledAny ? "✅ Push wake serviced." : "Woken by push — no pending step-up."
+            return handledAny
         } catch {
             pushStatus = "❌ Push-wake drain failed — \(error.localizedDescription)"
             return false
@@ -570,6 +662,18 @@ final class AgentModel: ObservableObject {
         if mediatorDid.isEmpty, let v = d.string(forKey: "pnm.mediatorDid") { mediatorDid = v }
         if gatewayUrl.isEmpty, let v = d.string(forKey: "pnm.gatewayUrl") { gatewayUrl = v }
     }
+}
+
+/// An incoming step-up awaiting the operator's Approve/Deny — the raw
+/// approve-request (to sign the response over) plus its parsed review.
+struct PendingApproval: Identifiable {
+    let id = UUID()
+    let rawDoc: String
+    let review: VtaMobileAgent.StepUpReview
+    /// The line to show/record — the structured summary, else the reason.
+    var summary: String { review.authorizationContext?.summary ?? review.reason }
+    /// The structured context, when present (drives the review card).
+    var context: AuthorizationContext? { review.authorizationContext }
 }
 
 /// A user-facing activity entry for the History tab.

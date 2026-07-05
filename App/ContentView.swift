@@ -33,6 +33,9 @@ struct ContentView: View {
         .environmentObject(model)
         .environmentObject(themeManager)
         .environmentObject(router)
+        .sheet(item: $model.pendingApproval) { pending in
+            ReviewSheet(pending: pending, model: model)
+        }
         .preferredColorScheme(themeManager.theme.preferredColorScheme)
         .onAppear {
             LogStore.shared.start()

@@ -3115,6 +3115,23 @@ private func uniffiFutureContinuationCallback(handle: UInt64, pollResult: Int8) 
 }
 
 /**
+ * Build a DID-signed **denial** `auth/step-up/approve-response/0.2`: decision
+ * `denied`, carrying the human `reason`, gated by the same `eddsa-jcs-2022`
+ * proof as an approval. A denial is a *signed refusal* — the VTA verifies the
+ * gate (so an injection can't forge it), audits `step_up_denied`, and elevates
+ * nothing. This is how the operator says "no" from the device.
+ */
+public func buildApproveResponseDenied(draft: ApproveResponseDraft, reason: String, signer: Signer) throws -> String {
+    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
+        uniffi_vta_mobile_core_fn_func_build_approve_response_denied(
+            FfiConverterTypeApproveResponseDraft.lower(draft),
+            FfiConverterString.lower(reason),
+            FfiConverterCallbackInterfaceSigner.lower(signer), $0
+        )
+    })
+}
+
+/**
  * Build a DID-signed `auth/step-up/approve-response/0.2`: decision `approved`,
  * `evidence.kind = didSigned`, gated by a Data Integrity proof
  * (`eddsa-jcs-2022`) over the document. `signer` is the native enclave key
@@ -3540,6 +3557,9 @@ private var initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_vta_mobile_core_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if uniffi_vta_mobile_core_checksum_func_build_approve_response_denied() != 686 {
+        return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_func_build_approve_response_did_signed() != 58960 {
         return InitializationResult.apiChecksumMismatch

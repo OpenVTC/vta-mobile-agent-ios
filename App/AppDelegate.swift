@@ -25,7 +25,40 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             directives: "info,vta_mobile_core=debug,vta_sdk=debug,affinidi_messaging_sdk=debug,"
                 + "affinidi_messaging_didcomm=debug,affinidi_did_resolver_cache_sdk=debug")
         UNUserNotificationCenter.current().delegate = self
+        registerApprovalCategory()
         return true
+    }
+
+    /// Register the Approve/Deny actions shown inline on an approval
+    /// notification. Both require the device be unlocked
+    /// (`.authenticationRequired`); Approve foregrounds so the enclave key's
+    /// biometric sign can run.
+    private func registerApprovalCategory() {
+        let approve = UNNotificationAction(
+            identifier: AgentModel.approveActionId, title: "Approve",
+            options: [.authenticationRequired, .foreground])
+        let deny = UNNotificationAction(
+            identifier: AgentModel.denyActionId, title: "Deny",
+            options: [.authenticationRequired, .destructive])
+        let category = UNNotificationCategory(
+            identifier: AgentModel.approvalCategoryId, actions: [approve, deny],
+            intentIdentifiers: [], options: [])
+        UNUserNotificationCenter.current().setNotificationCategories([category])
+    }
+
+    /// Handle a tap on an inline Approve/Deny action (or the notification body).
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        switch response.actionIdentifier {
+        case AgentModel.approveActionId:
+            await AgentModel.shared.approvePending()
+        case AgentModel.denyActionId:
+            await AgentModel.shared.denyPending()
+        default:
+            break  // body tap just opens the app; the review sheet shows the pending ask.
+        }
     }
 
     func application(

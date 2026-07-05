@@ -41,6 +41,27 @@ extension VtaMobileAgent {
             identity: identity, accessToken: accessToken)
     }
 
+    /// Pull the next inbound message and return its step-up approve-request
+    /// document (the DIDComm `body`) **without acting on it** — so the app can
+    /// present it for operator consent and then call `approveStepUp` /
+    /// `denyStepUp`. Returns `nil` if nothing arrived within `timeoutSecs` or the
+    /// message wasn't a step-up request. This is the human-in-the-loop path;
+    /// `receiveStepUpOnce` is the auto-ratify path.
+    public static func nextApproveRequest(
+        session: MediatorSession,
+        timeoutSecs: UInt64 = 30
+    ) async throws -> String? {
+        guard let messageJson = try await session.receiveNext(timeoutSecs: timeoutSecs) else {
+            return nil
+        }
+        guard let approveRequest = didcommBody(messageJson),
+            isStepUpApproveRequest(approveRequest)
+        else {
+            return nil
+        }
+        return approveRequest
+    }
+
     /// Unpack a raw `packed` authcrypt message from the VTA and, if it carries a
     /// step-up approve-request, approve it. For transports that deliver
     /// ciphertext directly (not via `MediatorSession`, which unpacks for you).

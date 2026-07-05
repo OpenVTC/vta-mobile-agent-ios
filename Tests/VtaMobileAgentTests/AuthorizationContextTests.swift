@@ -77,6 +77,27 @@ final class AuthorizationContextTests: XCTestCase {
         XCTAssertNil(review.authorizationContext)
     }
 
+    /// The review gate: a context-carrying ask must be shown for consent; a
+    /// plain login step-up may be auto-ratified.
+    func testRequiresReviewGate() throws {
+        let shareReview = try VtaMobileAgent.inspect(approveRequest: shareRequest)
+        XCTAssertTrue(VtaMobileAgent.requiresReview(shareReview))
+
+        let plain = """
+            {
+              "id": "urn:uuid:z",
+              "type": "https://trusttasks.org/spec/auth/step-up/approve-request/0.1",
+              "issuer": "did:webvh:vta",
+              "payload": {
+                "subject": "did:key:zAlice", "sessionId": "s1",
+                "challenge": "VHJhbnNmZXJDb25maXJtTm9uY2VYWQ", "reason": "Approve sign-in"
+              }
+            }
+            """
+        let plainReview = try VtaMobileAgent.inspect(approveRequest: plain)
+        XCTAssertFalse(VtaMobileAgent.requiresReview(plainReview))
+    }
+
     /// Spend + tool variants decode from their kind-tagged JSON.
     func testDecodesSpendAndToolActions() throws {
         let spend = AuthorizationContext.decode(
