@@ -125,6 +125,10 @@ extension VtaMobileAgent {
         public let sessionId: String
         public let targetAcr: String?
         public let authorizationContext: AuthorizationContext?
+        /// The relying party that issued the request (the approve-request
+        /// `issuer` — the VTA, or the domain on whose behalf it asks), shown so
+        /// the operator knows *who* is asking. `nil` if the request omitted it.
+        public let relyingParty: String?
     }
 
     /// Inspect an incoming approve-request (a bare document or a VTA `403` body)
@@ -139,6 +143,7 @@ extension VtaMobileAgent {
             subject: r.subject,
             sessionId: r.sessionId,
             targetAcr: r.targetAcr,
-            authorizationContext: ctx)
+            authorizationContext: ctx,
+            relyingParty: r.relyingParty)
     }
 }
