@@ -8,6 +8,7 @@ struct SettingsTab: View {
     @EnvironmentObject private var model: AgentModel
     @EnvironmentObject private var themeManager: ThemeManager
     @Environment(\.theme) private var theme
+    @State private var showScanner = false
 
     var body: some View {
         ScreenScaffold(title: "Settings") {
@@ -22,7 +23,17 @@ struct SettingsTab: View {
     private var vtaCard: some View {
         Card(tint: .blue) {
             CardHeader(title: "Your VTA", systemImage: "server.rack", tint: .blue)
-            Text("Enter the VTA's DID and tap Resolve — it fills the URL and mediator for you.")
+
+            // Fast path: pair in one scan from the operator's console/CLI.
+            Button {
+                showScanner = true
+            } label: {
+                Label("Pair with a QR code", systemImage: "qrcode.viewfinder")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            Text("Or enter the VTA's DID and tap Resolve to fill the URL and mediator.")
                 .font(.caption).foregroundStyle(.secondary)
 
             ThemedField(title: "VTA DID", prompt: "did:webvh:… / did:web:…",
@@ -46,6 +57,9 @@ struct SettingsTab: View {
         .onChange(of: model.vtaURL) { _ in model.saveConfig() }
         .onChange(of: model.mediatorDid) { _ in model.saveConfig() }
         .onChange(of: model.gatewayUrl) { _ in model.saveConfig() }
+        .sheet(isPresented: $showScanner) {
+            PairingScanner { model.applyPairing($0) }
+        }
     }
 
     private var behaviourCard: some View {
