@@ -3093,8 +3093,8 @@ private func uniffiFutureContinuationCallback(handle: UInt64, pollResult: Int8) 
 }
 
 /**
- * Build a DID-signed `auth/step-up/approve-response/0.1`: decision `approved`,
- * `evidence.kind = did-signed`, gated by a Data Integrity proof
+ * Build a DID-signed `auth/step-up/approve-response/0.2`: decision `approved`,
+ * `evidence.kind = didSigned`, gated by a Data Integrity proof
  * (`eddsa-jcs-2022`) over the document. `signer` is the native enclave key
  * (the holder/subject key) — its private material never enters this crate;
  * it only signs the canonical input produced here.
@@ -3109,7 +3109,7 @@ public func buildApproveResponseDidSigned(draft: ApproveResponseDraft, signer: S
 }
 
 /**
- * Build a passkey-backed `auth/step-up/approve-response/0.1`: decision
+ * Build a passkey-backed `auth/step-up/approve-response/0.2`: decision
  * `approved`, `evidence.kind = webauthn` carrying `assertion`. The assertion is
  * the gate, so no framework proof is attached. Returns the serialized Trust
  * Task JSON for the native layer to send back to the relying party.
@@ -3519,10 +3519,10 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_build_approve_response_did_signed() != 43347 {
+    if uniffi_vta_mobile_core_checksum_func_build_approve_response_did_signed() != 58960 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_build_approve_response_webauthn() != 33469 {
+    if uniffi_vta_mobile_core_checksum_func_build_approve_response_webauthn() != 38305 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_func_build_auth_challenge() != 60981 {
