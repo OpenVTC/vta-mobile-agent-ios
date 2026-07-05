@@ -50,10 +50,14 @@ final class AgentModel: ObservableObject {
     // Test-tab scratch.
     @Published var pastedApproveRequest = ""
 
-    /// An incoming step-up awaiting the operator's Approve/Deny (an AI ask that
-    /// carries a structured authorization context — not auto-ratified). Drives
-    /// the review sheet. `nil` when nothing is pending.
-    @Published var pendingApproval: PendingApproval?
+    /// Incoming step-ups awaiting the operator's Approve/Deny (AI asks that carry
+    /// a structured authorization context — not auto-ratified). A FIFO inbox so
+    /// concurrent asks don't clobber each other; the review sheet shows the
+    /// front. Empty when nothing is pending.
+    @Published var pendingApprovals: [PendingApproval] = []
+
+    /// The ask currently shown for review (the oldest outstanding one).
+    var frontApproval: PendingApproval? { pendingApprovals.first }
 
     // Activity history (newest first) for the History tab.
     @Published var events: [AgentEvent] = []
@@ -347,8 +351,11 @@ final class AgentModel: ObservableObject {
         do {
             let review = try VtaMobileAgent.inspect(approveRequest: doc)
             if VtaMobileAgent.requiresReview(review) {
-                pendingApproval = PendingApproval(rawDoc: doc, review: review)
-                stepUpStatus = "🔔 Approval requested — review it"
+                // Queue it (dedupe by session so a re-drain doesn't double-add).
+                if !pendingApprovals.contains(where: { $0.review.sessionId == review.sessionId }) {
+                    pendingApprovals.append(PendingApproval(rawDoc: doc, review: review))
+                }
+                stepUpStatus = "🔔 Approval requested — \(pendingApprovals.count) pending"
                 notifyPendingApproval(review)
             } else {
                 let outcome = try await VtaMobileAgent.approveStepUp(
@@ -364,43 +371,48 @@ final class AgentModel: ObservableObject {
         }
     }
 
-    /// Approve the pending ask (Face ID fires as the enclave key signs). Fetches
-    /// a fresh token — the ask may have sat a while.
-    func approvePending() async {
-        guard let pending = pendingApproval, let identity, let url = normalizedURL(),
-            !trimmedDid.isEmpty, let token = await currentAccessToken()
+    /// Resolve a specific queued ask (by session), or the front one if `sessionId`
+    /// isn't found (e.g. a notification action with no target). Approve signs
+    /// (Face ID fires as the enclave key signs); Deny sends a holder-signed
+    /// refusal the VTA audits. A fresh token is fetched — the ask may have sat.
+    func resolveApproval(
+        sessionId: String? = nil, approve: Bool, reason: String = "Declined by the operator"
+    ) async {
+        let pending =
+            sessionId.flatMap { sid in pendingApprovals.first { $0.review.sessionId == sid } }
+            ?? frontApproval
+        guard let pending, let identity, let url = normalizedURL(), !trimmedDid.isEmpty,
+            let token = await currentAccessToken()
         else { return }
         busy = true
         defer { busy = false }
         do {
-            let outcome = try await VtaMobileAgent.approveStepUp(
-                approveRequest: pending.rawDoc, vtaURL: url, vtaDid: trimmedDid,
-                identity: identity, accessToken: token)
-            stepUpStatus = "✅ Approved — \(pending.summary)"
-            recordEvent(.approval, "Approved", pending.summary)
-            pendingApproval = nil
+            if approve {
+                _ = try await VtaMobileAgent.approveStepUp(
+                    approveRequest: pending.rawDoc, vtaURL: url, vtaDid: trimmedDid,
+                    identity: identity, accessToken: token)
+                stepUpStatus = "✅ Approved — \(pending.summary)"
+                recordEvent(.approval, "Approved", pending.summary)
+            } else {
+                _ = try await VtaMobileAgent.denyStepUp(
+                    approveRequest: pending.rawDoc, reason: reason, vtaURL: url,
+                    vtaDid: trimmedDid, identity: identity, accessToken: token)
+                stepUpStatus = "🚫 Declined — \(pending.summary)"
+                recordEvent(.error, "Declined", pending.summary)
+            }
+            pendingApprovals.removeAll { $0.review.sessionId == pending.review.sessionId }
         } catch {
-            stepUpStatus = "❌ Approve failed — \(error.localizedDescription)"
+            stepUpStatus =
+                "❌ \(approve ? "Approve" : "Decline") failed — \(error.localizedDescription)"
         }
     }
 
-    /// Decline the pending ask — a holder-signed refusal the VTA audits.
-    func denyPending(reason: String = "Declined by the operator") async {
-        guard let pending = pendingApproval, let identity, let url = normalizedURL(),
-            !trimmedDid.isEmpty, let token = await currentAccessToken()
-        else { return }
-        busy = true
-        defer { busy = false }
-        do {
-            _ = try await VtaMobileAgent.denyStepUp(
-                approveRequest: pending.rawDoc, reason: reason, vtaURL: url,
-                vtaDid: trimmedDid, identity: identity, accessToken: token)
-            stepUpStatus = "🚫 Declined — \(pending.summary)"
-            recordEvent(.error, "Declined", pending.summary)
-            pendingApproval = nil
-        } catch {
-            stepUpStatus = "❌ Decline failed — \(error.localizedDescription)"
-        }
+    /// Convenience for the review sheet's buttons (act on the shown ask).
+    func approve(_ pending: PendingApproval) async {
+        await resolveApproval(sessionId: pending.review.sessionId, approve: true)
+    }
+    func deny(_ pending: PendingApproval) async {
+        await resolveApproval(sessionId: pending.review.sessionId, approve: false)
     }
 
     // MARK: Actionable approval notification
@@ -409,9 +421,14 @@ final class AgentModel: ObservableObject {
     static let approveActionId = "CIERGE_APPROVE"
     static let denyActionId = "CIERGE_DENY"
 
+    /// `UNNotification.userInfo` key carrying the ask's session id, so an inline
+    /// action resolves the exact ask it was posted for (not merely the front).
+    static let sessionUserInfoKey = "cierge.sessionId"
+
     /// Post a local notification for a pending approval, with inline Approve/Deny
     /// actions (registered by the `AppDelegate`) so the operator can act from the
-    /// lock screen without opening the app.
+    /// lock screen without opening the app. One notification per ask (keyed by
+    /// session), so concurrent asks each get their own.
     func notifyPendingApproval(_ review: VtaMobileAgent.StepUpReview) {
         let content = UNMutableNotificationContent()
         content.title = "Authorization requested"
@@ -419,8 +436,10 @@ final class AgentModel: ObservableObject {
         content.categoryIdentifier = Self.approvalCategoryId
         content.interruptionLevel = .timeSensitive
         content.sound = .default
+        content.userInfo = [Self.sessionUserInfoKey: review.sessionId]
         UNUserNotificationCenter.current().add(
-            UNNotificationRequest(identifier: "pending-approval", content: content, trigger: nil))
+            UNNotificationRequest(
+                identifier: "pending-approval-\(review.sessionId)", content: content, trigger: nil))
     }
 
     // MARK: Live mediator approver (supervised, auto-reconnecting)

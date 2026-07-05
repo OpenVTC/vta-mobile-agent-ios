@@ -33,8 +33,8 @@ struct ContentView: View {
         .environmentObject(model)
         .environmentObject(themeManager)
         .environmentObject(router)
-        .sheet(item: $model.pendingApproval) { pending in
-            ReviewSheet(pending: pending, model: model)
+        .sheet(item: Binding(get: { model.pendingApprovals.first }, set: { _ in })) { pending in
+            ReviewSheet(pending: pending, model: model, remaining: model.pendingApprovals.count)
         }
         .preferredColorScheme(themeManager.theme.preferredColorScheme)
         .onAppear {

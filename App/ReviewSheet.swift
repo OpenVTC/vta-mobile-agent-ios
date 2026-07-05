@@ -8,11 +8,19 @@ import VtaMobileAgent
 struct ReviewSheet: View {
     let pending: PendingApproval
     @ObservedObject var model: AgentModel
+    /// Total outstanding asks (this one + those queued behind it).
+    var remaining: Int = 1
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
+                    if remaining > 1 {
+                        Text("\(remaining) pending — reviewing 1 of \(remaining)")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                     if let context = pending.context {
                         AuthorizationCard(context: context)
                     } else {
@@ -30,7 +38,7 @@ struct ReviewSheet: View {
 
                     VStack(spacing: 12) {
                         Button {
-                            Task { await model.approvePending() }
+                            Task { await model.approve(pending) }
                         } label: {
                             Label("Approve", systemImage: "checkmark.circle.fill")
                                 .frame(maxWidth: .infinity)
@@ -39,7 +47,7 @@ struct ReviewSheet: View {
                         .controlSize(.large)
 
                         Button(role: .destructive) {
-                            Task { await model.denyPending() }
+                            Task { await model.deny(pending) }
                         } label: {
                             Label("Deny", systemImage: "xmark.circle.fill")
                                 .frame(maxWidth: .infinity)
