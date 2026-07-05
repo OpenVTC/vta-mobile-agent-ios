@@ -37,6 +37,8 @@ targets:
           - remote-notification
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
+        # Camera is used only to scan the first-run pairing QR code.
+        NSCameraUsageDescription: Scan a pairing QR code to connect this device to your VTA.
     # APNs push entitlement. `development` is the sandbox aps-environment used by
     # dev/debug builds; Xcode's automatic signing flips it to production for
     # release/TestFlight. Requires the App ID to have Push Notifications enabled.

@@ -119,6 +119,20 @@ final class AgentModel: ObservableObject {
         Task { await connect(auto: true) }
     }
 
+    /// Apply a scanned pairing payload: fill the connection config and connect.
+    /// Registering this device as the operator's delegated approver is a
+    /// follow-up once connected (needs a live VTA).
+    func applyPairing(_ p: PairingPayload) {
+        vtaURL = p.vtaURL
+        vtaDid = p.vtaDID
+        if let m = p.mediatorDID { mediatorDid = m }
+        if let g = p.gatewayURL { gatewayUrl = g }
+        persistConnection()
+        recordEvent(.info, "Paired via QR", p.tenant.map { "tenant · \($0)" } ?? p.vtaDID)
+        status = "Paired — connecting…"
+        Task { await connect() }
+    }
+
     // MARK: Connect / disconnect (auto + recoverable)
 
     /// Authenticate and bring the agent fully online: refresh-keepalive, the
