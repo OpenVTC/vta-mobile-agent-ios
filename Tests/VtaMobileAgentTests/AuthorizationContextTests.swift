@@ -41,6 +41,7 @@ final class AuthorizationContextTests: XCTestCase {
         let review = try VtaMobileAgent.inspect(approveRequest: shareRequest)
         XCTAssertEqual(review.reason, "finance wants to share salaryBand with travel")
         XCTAssertEqual(review.targetAcr, "aal2")
+        XCTAssertEqual(review.relyingParty, "did:webvh:vta")  // who is asking
         let ctx = try XCTUnwrap(review.authorizationContext)
         XCTAssertEqual(ctx.domain, "finance")
         XCTAssertEqual(ctx.tenant, "acme")

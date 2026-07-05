@@ -1,15 +1,26 @@
 import SwiftUI
 import VtaMobileAgent
 
-/// The consent gate: shows *what* an incoming step-up authorizes and lets the
-/// operator **Approve** (Face ID fires as the enclave key signs) or **Deny** (a
-/// holder-signed refusal the VTA audits). Presented whenever
-/// `AgentModel.pendingApproval` is set — from the live listener or a push wake.
+/// The consent gate: shows *what* an incoming step-up authorizes (and *who* is
+/// asking) and lets the operator **Approve** (Face ID fires as the enclave key
+/// signs) or **Deny with a reason** (a holder-signed refusal the VTA audits).
+/// Presented for the front of `AgentModel.pendingApprovals`.
 struct ReviewSheet: View {
     let pending: PendingApproval
     @ObservedObject var model: AgentModel
     /// Total outstanding asks (this one + those queued behind it).
     var remaining: Int = 1
+
+    @State private var showDenyReasons = false
+
+    /// Preset decline reasons (the operator can decline fast; the reason is
+    /// carried in the signed refusal for the audit trail).
+    private let denyReasons = [
+        "Not something I authorized",
+        "Wrong amount or scope",
+        "Not right now",
+        "Looks suspicious",
+    ]
 
     var body: some View {
         NavigationStack {
@@ -21,12 +32,25 @@ struct ReviewSheet: View {
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
+
                     if let context = pending.context {
                         AuthorizationCard(context: context)
                     } else {
                         Text(pending.review.reason)
                             .font(.headline)
                             .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if let rp = pending.review.relyingParty {
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Requested by \(rp)").font(.caption.monospaced())
+                                Text("verified by your VTA").font(.caption2)
+                            }
+                            .foregroundStyle(.secondary)
+                        }
+                        .font(.caption)
                     }
 
                     Text(
@@ -47,7 +71,7 @@ struct ReviewSheet: View {
                         .controlSize(.large)
 
                         Button(role: .destructive) {
-                            Task { await model.deny(pending) }
+                            showDenyReasons = true
                         } label: {
                             Label("Deny", systemImage: "xmark.circle.fill")
                                 .frame(maxWidth: .infinity)
@@ -56,12 +80,45 @@ struct ReviewSheet: View {
                         .controlSize(.large)
                     }
                     .disabled(model.busy)
+
+                    queuedPreview
                 }
                 .padding()
             }
             .navigationTitle("Authorize?")
             .navigationBarTitleDisplayMode(.inline)
             .interactiveDismissDisabled()  // force an explicit Approve/Deny
+            .confirmationDialog(
+                "Decline this request?", isPresented: $showDenyReasons, titleVisibility: .visible
+            ) {
+                ForEach(denyReasons, id: \.self) { reason in
+                    Button(reason, role: .destructive) {
+                        Task { await model.deny(pending, reason: reason) }
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            }
+        }
+    }
+
+    /// A read-only peek at what's queued behind the current ask.
+    @ViewBuilder private var queuedPreview: some View {
+        let queued = model.pendingApprovals.dropFirst()
+        if !queued.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Next in queue")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                ForEach(Array(queued)) { item in
+                    HStack(spacing: 6) {
+                        Image(systemName: "clock").font(.caption2).foregroundStyle(.tertiary)
+                        Text(item.summary).font(.caption2).foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 4)
         }
     }
 }

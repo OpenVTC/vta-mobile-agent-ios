@@ -401,6 +401,9 @@ final class AgentModel: ObservableObject {
                 recordEvent(.error, "Declined", pending.summary)
             }
             pendingApprovals.removeAll { $0.review.sessionId == pending.review.sessionId }
+            // Clear the (possibly still-visible) notification for this ask.
+            UNUserNotificationCenter.current().removeDeliveredNotifications(
+                withIdentifiers: ["pending-approval-\(pending.review.sessionId)"])
         } catch {
             stepUpStatus =
                 "❌ \(approve ? "Approve" : "Decline") failed — \(error.localizedDescription)"
@@ -411,8 +414,8 @@ final class AgentModel: ObservableObject {
     func approve(_ pending: PendingApproval) async {
         await resolveApproval(sessionId: pending.review.sessionId, approve: true)
     }
-    func deny(_ pending: PendingApproval) async {
-        await resolveApproval(sessionId: pending.review.sessionId, approve: false)
+    func deny(_ pending: PendingApproval, reason: String = "Declined by the operator") async {
+        await resolveApproval(sessionId: pending.review.sessionId, approve: false, reason: reason)
     }
 
     // MARK: Actionable approval notification
