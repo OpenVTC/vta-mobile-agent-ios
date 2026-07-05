@@ -51,13 +51,16 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
+        // The exact ask this notification was posted for (falls back to the front).
+        let sessionId =
+            response.notification.request.content.userInfo[AgentModel.sessionUserInfoKey] as? String
         switch response.actionIdentifier {
         case AgentModel.approveActionId:
-            await AgentModel.shared.approvePending()
+            await AgentModel.shared.resolveApproval(sessionId: sessionId, approve: true)
         case AgentModel.denyActionId:
-            await AgentModel.shared.denyPending()
+            await AgentModel.shared.resolveApproval(sessionId: sessionId, approve: false)
         default:
-            break  // body tap just opens the app; the review sheet shows the pending ask.
+            break  // body tap just opens the app; the review sheet shows the queue.
         }
     }
 
