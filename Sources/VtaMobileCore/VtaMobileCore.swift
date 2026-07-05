@@ -2012,6 +2012,14 @@ public struct StepUpRequest {
      * wants a passkey-backed elevation and supplied the ceremony parameters.
      */
     public var webauthnRequested: Bool
+    /**
+     * Structured authorization context (raw JSON), when the request carries one
+     * under the reverse-DNS `payload.ext` key `org.openvtc.authorization-context`
+     * — e.g. a Cierge cross-domain share / spend / tool ask. The native layer
+     * decodes and renders it as the approval card; absent for a plain
+     * login-elevation step-up (the UI falls back to `reason`).
+     */
+    public var authorizationContext: String?
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
@@ -2041,7 +2049,14 @@ public struct StepUpRequest {
         /* 
             * Whether the request carried WebAuthn options — i.e. the relying party
             * wants a passkey-backed elevation and supplied the ceremony parameters.
-            */ webauthnRequested: Bool
+            */ webauthnRequested: Bool,
+        /* 
+            * Structured authorization context (raw JSON), when the request carries one
+            * under the reverse-DNS `payload.ext` key `org.openvtc.authorization-context`
+            * — e.g. a Cierge cross-domain share / spend / tool ask. The native layer
+            * decodes and renders it as the approval card; absent for a plain
+            * login-elevation step-up (the UI falls back to `reason`).
+            */ authorizationContext: String?
     ) {
         self.relyingParty = relyingParty
         self.subject = subject
@@ -2051,6 +2066,7 @@ public struct StepUpRequest {
         self.targetAcr = targetAcr
         self.acceptableEvidence = acceptableEvidence
         self.webauthnRequested = webauthnRequested
+        self.authorizationContext = authorizationContext
     }
 }
 
@@ -2080,6 +2096,9 @@ extension StepUpRequest: Equatable, Hashable {
         if lhs.webauthnRequested != rhs.webauthnRequested {
             return false
         }
+        if lhs.authorizationContext != rhs.authorizationContext {
+            return false
+        }
         return true
     }
 
@@ -2092,6 +2111,7 @@ extension StepUpRequest: Equatable, Hashable {
         hasher.combine(targetAcr)
         hasher.combine(acceptableEvidence)
         hasher.combine(webauthnRequested)
+        hasher.combine(authorizationContext)
     }
 }
 
@@ -2109,7 +2129,8 @@ public struct FfiConverterTypeStepUpRequest: FfiConverterRustBuffer {
                 reason: FfiConverterString.read(from: &buf),
                 targetAcr: FfiConverterOptionString.read(from: &buf),
                 acceptableEvidence: FfiConverterSequenceString.read(from: &buf),
-                webauthnRequested: FfiConverterBool.read(from: &buf)
+                webauthnRequested: FfiConverterBool.read(from: &buf),
+                authorizationContext: FfiConverterOptionString.read(from: &buf)
             )
     }
 
@@ -2122,6 +2143,7 @@ public struct FfiConverterTypeStepUpRequest: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.targetAcr, into: &buf)
         FfiConverterSequenceString.write(value.acceptableEvidence, into: &buf)
         FfiConverterBool.write(value.webauthnRequested, into: &buf)
+        FfiConverterOptionString.write(value.authorizationContext, into: &buf)
     }
 }
 

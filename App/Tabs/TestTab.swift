@@ -101,6 +101,12 @@ struct TestTab: View {
                 .scrollContentBackground(.hidden)
                 .padding(8)
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color(uiColor: .tertiarySystemBackground)))
+            // When the pasted request carries a structured authorization ask,
+            // preview *what* it authorizes before ratifying.
+            if let ctx = pastedAuthorizationContext {
+                AuthorizationCard(context: ctx)
+                    .padding(.top, 4)
+            }
             Button {
                 Task { await model.approvePasted() }
             } label: {
@@ -108,6 +114,15 @@ struct TestTab: View {
             }
             .disabled(model.busy).padding(.top, 4)
         }
+    }
+
+    /// Decode the structured authorization context from the currently-pasted
+    /// approve-request, if it carries one (nil for a plain login step-up or
+    /// while the text isn't yet a valid document).
+    private var pastedAuthorizationContext: AuthorizationContext? {
+        let text = model.pastedApproveRequest.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        return (try? VtaMobileAgent.inspect(approveRequest: text))?.authorizationContext
     }
 
     private var pushCard: some View {
