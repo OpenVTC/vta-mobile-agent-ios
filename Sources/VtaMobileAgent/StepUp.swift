@@ -69,6 +69,54 @@ extension VtaMobileAgent {
         return StepUpOutcome(grantedAcr: acr, sessionId: request.sessionId)
     }
 
+    /// Outcome of a signed **denial**.
+    public struct DenyOutcome {
+        public let sessionId: String
+        public let reason: String
+    }
+
+    /// **Decline** a step-up described by `approveRequest`: post a holder-signed
+    /// `decision: denied` approve-response carrying `reason`. The VTA verifies
+    /// the did-signed gate (so a refusal can't be forged), audits `step_up_denied`,
+    /// and elevates nothing. This is how the operator says *no* from the device.
+    @discardableResult
+    public static func denyStepUp(
+        approveRequest: String,
+        reason: String,
+        vtaURL: URL,
+        vtaDid: String,
+        identity: HolderIdentity,
+        accessToken: String
+    ) async throws -> DenyOutcome {
+        let requestDoc = Self.unwrapApproveRequest(approveRequest)
+        let request = try parseStepUpRequest(json: requestDoc)
+
+        let draft = ApproveResponseDraft(
+            id: "urn:uuid:\(UUID().uuidString)",
+            issuerDid: identity.didKey,
+            recipientDid: vtaDid,
+            issuedAt: ISO8601DateFormatter().string(from: Date()),
+            subject: request.subject,
+            sessionId: request.sessionId,
+            challenge: request.challenge,
+            grantedAcr: nil)  // a denial elevates nothing
+        let responseDoc = try buildApproveResponseDenied(
+            draft: draft, reason: reason, signer: identity)
+
+        let client = VtaRestClient(baseURL: vtaURL)
+        _ = try await client.post(path: "/api/trust-tasks", body: responseDoc, bearer: accessToken)
+        return DenyOutcome(sessionId: request.sessionId, reason: reason)
+    }
+
+    /// Whether an incoming step-up should be **shown to the operator for consent**
+    /// rather than auto-ratified. A step-up that carries a structured
+    /// authorization context (a Cierge share / spend / tool ask) always prompts —
+    /// the human must see *what* they authorize. A plain login-elevation step-up
+    /// (no context) may be auto-approved for a frictionless sign-in.
+    public static func requiresReview(_ review: StepUpReview) -> Bool {
+        review.authorizationContext != nil
+    }
+
     /// Self-contained demo: provoke a step-up on *this device's own* session by
     /// poking an AAL2-gated endpoint with the AAL1 token, then approve it.
     /// Returns the granted acr (expected `"aal2"`). Handy to exercise the whole
