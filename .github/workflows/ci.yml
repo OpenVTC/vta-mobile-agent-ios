@@ -15,16 +15,19 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Show available simulators
-        run: xcrun simctl list devices available | grep -i iphone
-
       - name: Build + test on iOS Simulator
-        # Pins to a simulator name present on the runner image. If the image's
-        # device list changes, update the name (see the step above).
+        # Resolve an available iPhone simulator by UDID rather than pinning a
+        # name — the runner image's device list changes with each Xcode bump
+        # (e.g. iPhone 16 → iPhone 17-series), which silently breaks a pinned
+        # name. Pick the newest available iPhone so the smoke test survives it.
         run: |
+          xcrun simctl list devices available | grep -i iphone
+          udid="$(xcrun simctl list devices available -j \
+            | jq -r '[.devices[][] | select(.name | startswith("iPhone"))] | last | .udid')"
+          echo "Using iOS Simulator $udid"
           xcodebuild test \
             -scheme VtaMobileAgent-Package \
-            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            -destination "platform=iOS Simulator,id=$udid" \
             -skipPackagePluginValidation
 
   ios-app-build:
@@ -41,11 +44,10 @@ jobs:
       - name: Generate the Xcode project
         run: xcodegen generate
 
-      - name: Show available simulators
-        run: xcrun simctl list devices available | grep -i iphone
-
       - name: Build the app for the iOS Simulator
+        # A generic Simulator destination needs no specific device, so the
+        # build survives runner-image device-list changes (see the test job).
         run: |
           xcodebuild build \
             -scheme VtaMobileAgentApp \
-            -destination 'platform=iOS Simulator,name=iPhone 16'
+            -destination 'generic/platform=iOS Simulator'
