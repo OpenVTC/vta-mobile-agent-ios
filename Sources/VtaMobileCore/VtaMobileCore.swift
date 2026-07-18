@@ -2162,6 +2162,527 @@ public func FfiConverterTypeStepUpRequest_lower(_ value: StepUpRequest) -> RustB
 }
 
 /**
+ * The envelope + echo fields for a task-consent decision. `id` and `issued_at`
+ * are supplied by the native layer, keeping the builder pure.
+ */
+public struct TaskConsentDecisionDraft {
+    /**
+     * Document id (e.g. a fresh UUID).
+     */
+    public var id: String
+    /**
+     * The approver's DID (document `issuer`).
+     */
+    public var issuerDid: String
+    /**
+     * The VTA's DID (document `recipient`).
+     */
+    public var recipientDid: String
+    /**
+     * RFC 3339 timestamp for `issuedAt` and the proof's `created`.
+     */
+    public var issuedAt: String
+    /**
+     * Echoed verbatim from the request — binds this decision to that pending one.
+     */
+    public var challenge: String
+    /**
+     * Echoed verbatim from the request — the executor re-derives and matches it.
+     */
+    public var payloadDigest: String
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(
+        /* 
+         * Document id (e.g. a fresh UUID).
+         */ id: String,
+        /* 
+            * The approver's DID (document `issuer`).
+            */ issuerDid: String,
+        /* 
+            * The VTA's DID (document `recipient`).
+            */ recipientDid: String,
+        /* 
+            * RFC 3339 timestamp for `issuedAt` and the proof's `created`.
+            */ issuedAt: String,
+        /* 
+            * Echoed verbatim from the request — binds this decision to that pending one.
+            */ challenge: String,
+        /* 
+            * Echoed verbatim from the request — the executor re-derives and matches it.
+            */ payloadDigest: String
+    ) {
+        self.id = id
+        self.issuerDid = issuerDid
+        self.recipientDid = recipientDid
+        self.issuedAt = issuedAt
+        self.challenge = challenge
+        self.payloadDigest = payloadDigest
+    }
+}
+
+extension TaskConsentDecisionDraft: Equatable, Hashable {
+    public static func == (lhs: TaskConsentDecisionDraft, rhs: TaskConsentDecisionDraft) -> Bool {
+        if lhs.id != rhs.id {
+            return false
+        }
+        if lhs.issuerDid != rhs.issuerDid {
+            return false
+        }
+        if lhs.recipientDid != rhs.recipientDid {
+            return false
+        }
+        if lhs.issuedAt != rhs.issuedAt {
+            return false
+        }
+        if lhs.challenge != rhs.challenge {
+            return false
+        }
+        if lhs.payloadDigest != rhs.payloadDigest {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(issuerDid)
+        hasher.combine(recipientDid)
+        hasher.combine(issuedAt)
+        hasher.combine(challenge)
+        hasher.combine(payloadDigest)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTaskConsentDecisionDraft: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TaskConsentDecisionDraft {
+        return
+            try TaskConsentDecisionDraft(
+                id: FfiConverterString.read(from: &buf),
+                issuerDid: FfiConverterString.read(from: &buf),
+                recipientDid: FfiConverterString.read(from: &buf),
+                issuedAt: FfiConverterString.read(from: &buf),
+                challenge: FfiConverterString.read(from: &buf),
+                payloadDigest: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: TaskConsentDecisionDraft, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.issuerDid, into: &buf)
+        FfiConverterString.write(value.recipientDid, into: &buf)
+        FfiConverterString.write(value.issuedAt, into: &buf)
+        FfiConverterString.write(value.challenge, into: &buf)
+        FfiConverterString.write(value.payloadDigest, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTaskConsentDecisionDraft_lift(_ buf: RustBuffer) throws -> TaskConsentDecisionDraft {
+    return try FfiConverterTypeTaskConsentDecisionDraft.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTaskConsentDecisionDraft_lower(_ value: TaskConsentDecisionDraft) -> RustBuffer {
+    return FfiConverterTypeTaskConsentDecisionDraft.lower(value)
+}
+
+/**
+ * One consequence of executing the task, authored by the VTA by dry-running the
+ * handler it is about to invoke. The `kind` set is OPEN — a surface MUST render
+ * a kind it does not recognise (always show `summary`).
+ */
+public struct TaskConsentEffect {
+    public var kind: String
+    /**
+     * Human-facing sentence — the one member always safe to render.
+     */
+    public var summary: String
+    public var path: String?
+    /**
+     * Prior/resulting values as raw JSON strings, when present (for a diff).
+     */
+    public var before: String?
+    public var after: String?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(kind: String,
+                /* 
+                    * Human-facing sentence — the one member always safe to render.
+                    */ summary: String, path: String?,
+                /* 
+                    * Prior/resulting values as raw JSON strings, when present (for a diff).
+                    */ before: String?, after: String?)
+    {
+        self.kind = kind
+        self.summary = summary
+        self.path = path
+        self.before = before
+        self.after = after
+    }
+}
+
+extension TaskConsentEffect: Equatable, Hashable {
+    public static func == (lhs: TaskConsentEffect, rhs: TaskConsentEffect) -> Bool {
+        if lhs.kind != rhs.kind {
+            return false
+        }
+        if lhs.summary != rhs.summary {
+            return false
+        }
+        if lhs.path != rhs.path {
+            return false
+        }
+        if lhs.before != rhs.before {
+            return false
+        }
+        if lhs.after != rhs.after {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(kind)
+        hasher.combine(summary)
+        hasher.combine(path)
+        hasher.combine(before)
+        hasher.combine(after)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTaskConsentEffect: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TaskConsentEffect {
+        return
+            try TaskConsentEffect(
+                kind: FfiConverterString.read(from: &buf),
+                summary: FfiConverterString.read(from: &buf),
+                path: FfiConverterOptionString.read(from: &buf),
+                before: FfiConverterOptionString.read(from: &buf),
+                after: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: TaskConsentEffect, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterString.write(value.summary, into: &buf)
+        FfiConverterOptionString.write(value.path, into: &buf)
+        FfiConverterOptionString.write(value.before, into: &buf)
+        FfiConverterOptionString.write(value.after, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTaskConsentEffect_lift(_ buf: RustBuffer) throws -> TaskConsentEffect {
+    return try FfiConverterTypeTaskConsentEffect.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTaskConsentEffect_lower(_ value: TaskConsentEffect) -> RustBuffer {
+    return FfiConverterTypeTaskConsentEffect.lower(value)
+}
+
+/**
+ * The `task-consent/request` fields the native approval UI needs to display and
+ * to answer.
+ */
+public struct TaskConsentRequest {
+    /**
+     * The VTA that issued the request (document `issuer`), when present.
+     */
+    public var issuer: String?
+    /**
+     * Nonce echoed + bound into the decision (never recomputed here).
+     */
+    public var challenge: String
+    /**
+     * The salted digest the decision echoes; the executor re-derives it from the
+     * payload it is about to run and refuses on mismatch.
+     */
+    public var payloadDigest: String
+    /**
+     * First chars of `payload_digest` — the code the operator matches against
+     * the requesting screen.
+     */
+    public var matchCode: String
+    /**
+     * Type URI of the task awaiting approval.
+     */
+    public var taskType: String
+    /**
+     * The DID that submitted the task.
+     */
+    public var requester: String
+    /**
+     * Named approver set the policy required.
+     */
+    public var approverSet: String?
+    /**
+     * Distinct approvals the policy requires.
+     */
+    public var minApprovals: UInt64
+    /**
+     * Integrity effect of executing: `none` | `mutating` | `destructive`.
+     */
+    public var sideEffects: String?
+    /**
+     * What executing discloses to the caller: `none` | `metadata` | `secret`.
+     */
+    public var discloses: String?
+    /**
+     * Whether the task acts with the subject's own authority.
+     */
+    public var actsAsSubject: Bool
+    /**
+     * What executing will do — the basis of the operator's decision. MAY be
+     * empty; fall back to `consequences`, and if both are empty the UI must say
+     * the consequences could not be determined (never render "no effects").
+     */
+    public var effects: [TaskConsentEffect]
+    /**
+     * The identifier the task acts on, when known.
+     */
+    public var subject: String?
+    /**
+     * Browser-attested origin of the page that proposed the task, when present.
+     */
+    public var origin: String?
+    /**
+     * RFC 3339 expiry of the pending request, when present.
+     */
+    public var expiresAt: String?
+    /**
+     * The task specification's static fallback text, used when `effects` is
+     * empty because the VTA had no dry-run for this handler.
+     */
+    public var consequences: [String]
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(
+        /* 
+         * The VTA that issued the request (document `issuer`), when present.
+         */ issuer: String?,
+        /* 
+            * Nonce echoed + bound into the decision (never recomputed here).
+            */ challenge: String,
+        /* 
+            * The salted digest the decision echoes; the executor re-derives it from the
+            * payload it is about to run and refuses on mismatch.
+            */ payloadDigest: String,
+        /* 
+            * First chars of `payload_digest` — the code the operator matches against
+            * the requesting screen.
+            */ matchCode: String,
+        /* 
+            * Type URI of the task awaiting approval.
+            */ taskType: String,
+        /* 
+            * The DID that submitted the task.
+            */ requester: String,
+        /* 
+            * Named approver set the policy required.
+            */ approverSet: String?,
+        /* 
+            * Distinct approvals the policy requires.
+            */ minApprovals: UInt64,
+        /* 
+            * Integrity effect of executing: `none` | `mutating` | `destructive`.
+            */ sideEffects: String?,
+        /* 
+            * What executing discloses to the caller: `none` | `metadata` | `secret`.
+            */ discloses: String?,
+        /* 
+            * Whether the task acts with the subject's own authority.
+            */ actsAsSubject: Bool,
+        /* 
+            * What executing will do — the basis of the operator's decision. MAY be
+            * empty; fall back to `consequences`, and if both are empty the UI must say
+            * the consequences could not be determined (never render "no effects").
+            */ effects: [TaskConsentEffect],
+        /* 
+            * The identifier the task acts on, when known.
+            */ subject: String?,
+        /* 
+            * Browser-attested origin of the page that proposed the task, when present.
+            */ origin: String?,
+        /* 
+            * RFC 3339 expiry of the pending request, when present.
+            */ expiresAt: String?,
+        /* 
+            * The task specification's static fallback text, used when `effects` is
+            * empty because the VTA had no dry-run for this handler.
+            */ consequences: [String]
+    ) {
+        self.issuer = issuer
+        self.challenge = challenge
+        self.payloadDigest = payloadDigest
+        self.matchCode = matchCode
+        self.taskType = taskType
+        self.requester = requester
+        self.approverSet = approverSet
+        self.minApprovals = minApprovals
+        self.sideEffects = sideEffects
+        self.discloses = discloses
+        self.actsAsSubject = actsAsSubject
+        self.effects = effects
+        self.subject = subject
+        self.origin = origin
+        self.expiresAt = expiresAt
+        self.consequences = consequences
+    }
+}
+
+extension TaskConsentRequest: Equatable, Hashable {
+    public static func == (lhs: TaskConsentRequest, rhs: TaskConsentRequest) -> Bool {
+        if lhs.issuer != rhs.issuer {
+            return false
+        }
+        if lhs.challenge != rhs.challenge {
+            return false
+        }
+        if lhs.payloadDigest != rhs.payloadDigest {
+            return false
+        }
+        if lhs.matchCode != rhs.matchCode {
+            return false
+        }
+        if lhs.taskType != rhs.taskType {
+            return false
+        }
+        if lhs.requester != rhs.requester {
+            return false
+        }
+        if lhs.approverSet != rhs.approverSet {
+            return false
+        }
+        if lhs.minApprovals != rhs.minApprovals {
+            return false
+        }
+        if lhs.sideEffects != rhs.sideEffects {
+            return false
+        }
+        if lhs.discloses != rhs.discloses {
+            return false
+        }
+        if lhs.actsAsSubject != rhs.actsAsSubject {
+            return false
+        }
+        if lhs.effects != rhs.effects {
+            return false
+        }
+        if lhs.subject != rhs.subject {
+            return false
+        }
+        if lhs.origin != rhs.origin {
+            return false
+        }
+        if lhs.expiresAt != rhs.expiresAt {
+            return false
+        }
+        if lhs.consequences != rhs.consequences {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(issuer)
+        hasher.combine(challenge)
+        hasher.combine(payloadDigest)
+        hasher.combine(matchCode)
+        hasher.combine(taskType)
+        hasher.combine(requester)
+        hasher.combine(approverSet)
+        hasher.combine(minApprovals)
+        hasher.combine(sideEffects)
+        hasher.combine(discloses)
+        hasher.combine(actsAsSubject)
+        hasher.combine(effects)
+        hasher.combine(subject)
+        hasher.combine(origin)
+        hasher.combine(expiresAt)
+        hasher.combine(consequences)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTaskConsentRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TaskConsentRequest {
+        return
+            try TaskConsentRequest(
+                issuer: FfiConverterOptionString.read(from: &buf),
+                challenge: FfiConverterString.read(from: &buf),
+                payloadDigest: FfiConverterString.read(from: &buf),
+                matchCode: FfiConverterString.read(from: &buf),
+                taskType: FfiConverterString.read(from: &buf),
+                requester: FfiConverterString.read(from: &buf),
+                approverSet: FfiConverterOptionString.read(from: &buf),
+                minApprovals: FfiConverterUInt64.read(from: &buf),
+                sideEffects: FfiConverterOptionString.read(from: &buf),
+                discloses: FfiConverterOptionString.read(from: &buf),
+                actsAsSubject: FfiConverterBool.read(from: &buf),
+                effects: FfiConverterSequenceTypeTaskConsentEffect.read(from: &buf),
+                subject: FfiConverterOptionString.read(from: &buf),
+                origin: FfiConverterOptionString.read(from: &buf),
+                expiresAt: FfiConverterOptionString.read(from: &buf),
+                consequences: FfiConverterSequenceString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: TaskConsentRequest, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.issuer, into: &buf)
+        FfiConverterString.write(value.challenge, into: &buf)
+        FfiConverterString.write(value.payloadDigest, into: &buf)
+        FfiConverterString.write(value.matchCode, into: &buf)
+        FfiConverterString.write(value.taskType, into: &buf)
+        FfiConverterString.write(value.requester, into: &buf)
+        FfiConverterOptionString.write(value.approverSet, into: &buf)
+        FfiConverterUInt64.write(value.minApprovals, into: &buf)
+        FfiConverterOptionString.write(value.sideEffects, into: &buf)
+        FfiConverterOptionString.write(value.discloses, into: &buf)
+        FfiConverterBool.write(value.actsAsSubject, into: &buf)
+        FfiConverterSequenceTypeTaskConsentEffect.write(value.effects, into: &buf)
+        FfiConverterOptionString.write(value.subject, into: &buf)
+        FfiConverterOptionString.write(value.origin, into: &buf)
+        FfiConverterOptionString.write(value.expiresAt, into: &buf)
+        FfiConverterSequenceString.write(value.consequences, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTaskConsentRequest_lift(_ buf: RustBuffer) throws -> TaskConsentRequest {
+    return try FfiConverterTypeTaskConsentRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTaskConsentRequest_lower(_ value: TaskConsentRequest) -> RustBuffer {
+    return FfiConverterTypeTaskConsentRequest.lower(value)
+}
+
+/**
  * The outcome of unpacking an inbound DIDComm message.
  */
 public struct UnpackedMessage {
@@ -3067,6 +3588,31 @@ private struct FfiConverterSequenceString: FfiConverterRustBuffer {
     }
 }
 
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeTaskConsentEffect: FfiConverterRustBuffer {
+    typealias SwiftType = [TaskConsentEffect]
+
+    static func write(_ value: [TaskConsentEffect], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTaskConsentEffect.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TaskConsentEffect] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TaskConsentEffect]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeTaskConsentEffect.read(from: &buf))
+        }
+        return seq
+    }
+}
+
 private let UNIFFI_RUST_FUTURE_POLL_READY: Int8 = 0
 private let UNIFFI_RUST_FUTURE_POLL_MAYBE_READY: Int8 = 1
 
@@ -3284,6 +3830,35 @@ public func buildRevokeSession(env: AuthEnvelope, sessionId: String, reason: Str
 }
 
 /**
+ * Build a DID-signed **denial** `task-consent/decision/0.1`, carrying the human
+ * `reason`, gated by the same proof. A denial is a signed refusal the executor
+ * records; nothing executes.
+ */
+public func buildTaskConsentDecisionDenied(draft: TaskConsentDecisionDraft, reason: String, signer: Signer) throws -> String {
+    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
+        uniffi_vta_mobile_core_fn_func_build_task_consent_decision_denied(
+            FfiConverterTypeTaskConsentDecisionDraft.lower(draft),
+            FfiConverterString.lower(reason),
+            FfiConverterCallbackInterfaceSigner.lower(signer), $0
+        )
+    })
+}
+
+/**
+ * Build a DID-signed **approval** `task-consent/decision/0.1`, gated by an
+ * `eddsa-jcs-2022` Data Integrity proof over the document. `signer` is the
+ * native enclave key; its private material never enters this crate.
+ */
+public func buildTaskConsentDecisionDidSigned(draft: TaskConsentDecisionDraft, signer: Signer) throws -> String {
+    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
+        uniffi_vta_mobile_core_fn_func_build_task_consent_decision_did_signed(
+            FfiConverterTypeTaskConsentDecisionDraft.lower(draft),
+            FfiConverterCallbackInterfaceSigner.lower(signer), $0
+        )
+    })
+}
+
+/**
  * Build a signed `auth/whoami/0.1` introspection request. The payload is empty;
  * like authenticate, `auth/whoami` is `IS_PROOF_REQUIRED == true`, so the
  * holder-signed framework proof (via `signer`, reusing [`crate::proof`]) is
@@ -3469,6 +4044,20 @@ public func parseStepUpRequest(json: String) throws -> StepUpRequest {
 }
 
 /**
+ * Parse an inbound `task-consent/request/0.1` for display.
+ *
+ * Lenient by design (see the module note): validates the document type and the
+ * binding fields the decision must echo, and surfaces the rest best-effort.
+ */
+public func parseTaskConsentRequest(json: String) throws -> TaskConsentRequest {
+    return try FfiConverterTypeTaskConsentRequest.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
+        uniffi_vta_mobile_core_fn_func_parse_task_consent_request(
+            FfiConverterString.lower(json), $0
+        )
+    })
+}
+
+/**
  * Parse an `auth/whoami/0.1#response` — the auth service's view of the holder:
  * the current session plus the roles/scopes it holds.
  */
@@ -3588,6 +4177,12 @@ private var initializationResult: InitializationResult = {
     if uniffi_vta_mobile_core_checksum_func_build_revoke_session() != 1406 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_vta_mobile_core_checksum_func_build_task_consent_decision_denied() != 2919 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_vta_mobile_core_checksum_func_build_task_consent_decision_did_signed() != 10113 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_vta_mobile_core_checksum_func_build_whoami() != 28487 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3625,6 +4220,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_func_parse_step_up_request() != 32256 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_vta_mobile_core_checksum_func_parse_task_consent_request() != 64544 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_func_parse_whoami_response() != 41103 {
