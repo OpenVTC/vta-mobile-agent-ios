@@ -17,6 +17,51 @@ extension VtaMobileAgent {
     static let stepUpApproveRequestType =
         "https://trusttasks.org/spec/auth/step-up/approve-request/0.1"
 
+    /// Trust Task `type` of a task-consent request (the delegated-execution
+    /// approval this device answers as a second approving device).
+    static let taskConsentRequestType =
+        "https://trusttasks.org/spec/task-consent/request/0.1"
+
+    /// A human-in-the-loop inbound the VTA addressed to this device, tagged by
+    /// kind so the app can route it to the right approval surface. Carries the
+    /// DIDComm `body` document verbatim (the app re-parses it for display and to
+    /// build the signed response/decision).
+    public enum InboundRequest {
+        /// An `auth/step-up/approve-request/0.1` — answer with `approveStepUp` /
+        /// `denyStepUp`.
+        case stepUp(String)
+        /// A `task-consent/request/0.1` — answer with `approveTaskConsent` /
+        /// `denyTaskConsent`.
+        case taskConsent(String)
+    }
+
+    /// Pull the next inbound message off a connected `MediatorSession` (waiting up
+    /// to `timeoutSecs`) and, if it is one of the requests this device answers,
+    /// return it tagged **without acting on it** — so the app can present it for
+    /// operator consent. Returns `nil` if nothing arrived in time or the message
+    /// is neither a step-up nor a task-consent request. Supersedes
+    /// [`nextApproveRequest`] for a listener that services both.
+    ///
+    /// `MediatorSession` (ATM) has already authenticated the sender and decrypted
+    /// under the holder key, so the message is plaintext here.
+    public static func nextInbound(
+        session: MediatorSession,
+        timeoutSecs: UInt64 = 30
+    ) async throws -> InboundRequest? {
+        guard let messageJson = try await session.receiveNext(timeoutSecs: timeoutSecs),
+            let body = didcommBody(messageJson)
+        else {
+            return nil
+        }
+        if isStepUpApproveRequest(body) {
+            return .stepUp(body)
+        }
+        if isTaskConsentRequest(body) {
+            return .taskConsent(body)
+        }
+        return nil  // some other traffic (e.g. a granted notice for a requester) — ignore
+    }
+
     /// Pull the next inbound message off a connected `MediatorSession` (waiting
     /// up to `timeoutSecs`) and, if it carries a step-up approve-request,
     /// approve it. Returns the outcome, `nil` if nothing arrived in time or the
@@ -125,10 +170,19 @@ extension VtaMobileAgent {
 
     /// True when `doc` is an `auth/step-up/approve-request/0.1` document.
     static func isStepUpApproveRequest(_ doc: String) -> Bool {
+        docType(doc) == stepUpApproveRequestType
+    }
+
+    /// True when `doc` is a `task-consent/request/0.1` document.
+    static func isTaskConsentRequest(_ doc: String) -> Bool {
+        docType(doc) == taskConsentRequestType
+    }
+
+    /// The `type` string of a JSON document, or `nil` if it has none.
+    private static func docType(_ doc: String) -> String? {
         guard let data = doc.data(using: .utf8),
-            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let type = obj["type"] as? String
-        else { return false }
-        return type == stepUpApproveRequestType
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return obj["type"] as? String
     }
 }

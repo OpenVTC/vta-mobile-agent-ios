@@ -59,6 +59,14 @@ final class AgentModel: ObservableObject {
     /// The ask currently shown for review (the oldest outstanding one).
     var frontApproval: PendingApproval? { pendingApprovals.first }
 
+    /// Outstanding **task-consent** approvals — the device acting as a second
+    /// approving device for a privileged Trust Task. Deduped by `payloadDigest`;
+    /// the sheet shows the front. Empty when nothing is pending.
+    @Published var pendingConsents: [PendingConsent] = []
+
+    /// The task-consent ask currently shown for review (the oldest outstanding).
+    var frontConsent: PendingConsent? { pendingConsents.first }
+
     // Activity history (newest first) for the History tab.
     @Published var events: [AgentEvent] = []
 
@@ -459,6 +467,93 @@ final class AgentModel: ObservableObject {
                 identifier: "pending-approval-\(review.sessionId)", content: content, trigger: nil))
     }
 
+    // MARK: Task-consent (second-device approval)
+
+    /// Queue an inbound `task-consent/request` for the operator. Unlike a plain
+    /// login step-up there is no auto-ratify path: a privileged Trust Task always
+    /// requires the human to see the effects and decide.
+    private func handleIncomingTaskConsent(
+        doc: String, url: URL, did: String, token: String, identity: HolderIdentity
+    ) async {
+        do {
+            let request = try VtaMobileAgent.inspectTaskConsent(request: doc)
+            // Dedupe by payloadDigest so a re-drain doesn't double-add.
+            if !pendingConsents.contains(where: { $0.request.payloadDigest == request.payloadDigest })
+            {
+                pendingConsents.append(PendingConsent(rawDoc: doc, request: request))
+            }
+            stepUpStatus = "🔔 Approval requested — \(pendingConsents.count) task-consent pending"
+            notifyPendingConsent(request)
+        } catch {
+            stepUpStatus = "❌ Task-consent parse failed — \(error.localizedDescription)"
+        }
+    }
+
+    /// Resolve a queued task-consent (by `payloadDigest`, else the front one).
+    /// Approve signs the decision (Face ID fires as the enclave key signs) and
+    /// posts it; Deny sends a signed refusal the VTA records. A fresh token is
+    /// fetched — the ask may have sat.
+    func resolveConsent(
+        payloadDigest: String? = nil, approve: Bool, reason: String = "Declined by the operator"
+    ) async {
+        let pending =
+            payloadDigest.flatMap { d in pendingConsents.first { $0.request.payloadDigest == d } }
+            ?? frontConsent
+        guard let pending, let identity, let url = normalizedURL(), !trimmedDid.isEmpty,
+            let token = await currentAccessToken()
+        else { return }
+        busy = true
+        defer { busy = false }
+        do {
+            if approve {
+                let outcome = try await VtaMobileAgent.approveTaskConsent(
+                    request: pending.rawDoc, vtaURL: url, vtaDid: trimmedDid,
+                    identity: identity, accessToken: token)
+                stepUpStatus = "✅ Approved — \(pending.summary) (\(outcome.status))"
+                recordEvent(.approval, "Approved task", pending.summary)
+            } else {
+                _ = try await VtaMobileAgent.denyTaskConsent(
+                    request: pending.rawDoc, reason: reason, vtaURL: url,
+                    vtaDid: trimmedDid, identity: identity, accessToken: token)
+                stepUpStatus = "🚫 Declined — \(pending.summary)"
+                recordEvent(.error, "Declined task", pending.summary)
+            }
+            pendingConsents.removeAll { $0.request.payloadDigest == pending.request.payloadDigest }
+            UNUserNotificationCenter.current().removeDeliveredNotifications(
+                withIdentifiers: ["pending-consent-\(pending.request.payloadDigest)"])
+        } catch {
+            stepUpStatus =
+                "❌ \(approve ? "Approve" : "Decline") failed — \(error.localizedDescription)"
+        }
+    }
+
+    /// Convenience for the task-consent sheet's buttons.
+    func approveConsent(_ pending: PendingConsent) async {
+        await resolveConsent(payloadDigest: pending.request.payloadDigest, approve: true)
+    }
+    func denyConsent(_ pending: PendingConsent, reason: String = "Declined by the operator") async {
+        await resolveConsent(
+            payloadDigest: pending.request.payloadDigest, approve: false, reason: reason)
+    }
+
+    /// Post a time-sensitive notification for a pending task-consent, keyed by
+    /// `payloadDigest` so concurrent asks each get their own.
+    func notifyPendingConsent(_ request: VtaMobileAgent.TaskConsentRequest) {
+        let content = UNMutableNotificationContent()
+        content.title = "Approval requested"
+        content.body =
+            request.effects.first?.summary
+            ?? request.consequences.first
+            ?? "A privileged task needs your approval."
+        content.categoryIdentifier = Self.approvalCategoryId
+        content.interruptionLevel = .timeSensitive
+        content.sound = .default
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(
+                identifier: "pending-consent-\(request.payloadDigest)", content: content,
+                trigger: nil))
+    }
+
     // MARK: Live mediator approver (supervised, auto-reconnecting)
 
     func toggleMediatorListen() async {
@@ -501,12 +596,19 @@ final class AgentModel: ObservableObject {
                     backoff = 1
                     while !Task.isCancelled {
                         // Pull the next request WITHOUT acting — so an AI ask that
-                        // carries a structured authorization context is surfaced
-                        // for the operator's Approve/Deny instead of auto-ratified.
-                        guard let doc = try await VtaMobileAgent.nextApproveRequest(session: session)
-                        else { continue }  // timeout / not a step-up → keep listening
-                        await handleIncomingStepUp(
-                            doc: doc, url: url, did: did, token: token, identity: identity)
+                        // carries a structured authorization context, or a
+                        // task-consent approval, is surfaced for the operator's
+                        // Approve/Deny instead of auto-ratified.
+                        guard let inbound = try await VtaMobileAgent.nextInbound(session: session)
+                        else { continue }  // timeout / other traffic → keep listening
+                        switch inbound {
+                        case .stepUp(let doc):
+                            await handleIncomingStepUp(
+                                doc: doc, url: url, did: did, token: token, identity: identity)
+                        case .taskConsent(let doc):
+                            await handleIncomingTaskConsent(
+                                doc: doc, url: url, did: did, token: token, identity: identity)
+                        }
                     }
                     await session.shutdown()
                 } catch {
@@ -627,18 +729,25 @@ final class AgentModel: ObservableObject {
             var handledAny = false
             for _ in 0..<5 {
                 guard
-                    let doc = try await VtaMobileAgent.nextApproveRequest(
+                    let inbound = try await VtaMobileAgent.nextInbound(
                         session: session, timeoutSecs: 5)
                 else { break }
                 handledAny = true
-                // Same gate as the live listener: an AI ask surfaces for consent
-                // (posts the actionable notification — ideal for a background
+                // Same gate as the live listener: surface the ask for consent
+                // (posting the actionable notification — ideal for a background
                 // wake); a plain login step-up auto-ratifies.
-                await handleIncomingStepUp(
-                    doc: doc, url: vtaURLValue, did: cfg.vtaDid,
-                    token: accessToken, identity: id)
+                switch inbound {
+                case .stepUp(let doc):
+                    await handleIncomingStepUp(
+                        doc: doc, url: vtaURLValue, did: cfg.vtaDid,
+                        token: accessToken, identity: id)
+                case .taskConsent(let doc):
+                    await handleIncomingTaskConsent(
+                        doc: doc, url: vtaURLValue, did: cfg.vtaDid,
+                        token: accessToken, identity: id)
+                }
             }
-            pushStatus = handledAny ? "✅ Push wake serviced." : "Woken by push — no pending step-up."
+            pushStatus = handledAny ? "✅ Push wake serviced." : "Woken by push — nothing pending."
             return handledAny
         } catch {
             pushStatus = "❌ Push-wake drain failed — \(error.localizedDescription)"
@@ -710,6 +819,21 @@ struct PendingApproval: Identifiable {
     var summary: String { review.authorizationContext?.summary ?? review.reason }
     /// The structured context, when present (drives the review card).
     var context: AuthorizationContext? { review.authorizationContext }
+}
+
+/// One outstanding **task-consent** ask — the device as a second approver.
+struct PendingConsent: Identifiable {
+    let id = UUID()
+    /// The raw `task-consent/request` document (the DIDComm body) — re-parsed and
+    /// re-sent verbatim so the decision binds to exactly what was shown.
+    let rawDoc: String
+    let request: VtaMobileAgent.TaskConsentRequest
+    /// The line to show/record — the first effect, else static consequence text.
+    var summary: String {
+        request.effects.first?.summary
+            ?? request.consequences.first
+            ?? "Execute \(request.taskType)"
+    }
 }
 
 /// A user-facing activity entry for the History tab.
