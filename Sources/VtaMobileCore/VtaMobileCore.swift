@@ -921,6 +921,199 @@ public func FfiConverterTypeMediatorSession_lower(_ value: MediatorSession) -> U
 }
 
 /**
+ * A live TSP session to a mediator, scoped to one holder identity.
+ */
+public protocol TspMediatorSessionProtocol: AnyObject {
+    /**
+     * Wait up to `timeout_secs` for the next inbound TSP message from the
+     * mediator. Returns the unpacked Trust-Task document as JSON — the phone
+     * parses it exactly as it parses a DIDComm-delivered one (its own
+     * `type`/`issuer` fields), with the difference that TSP carries the inner
+     * document directly rather than inside a DIDComm envelope's `body`. Returns
+     * `None` if nothing arrived within the timeout. Call again to keep polling.
+     */
+    func receiveNext(timeoutSecs: UInt64) async throws -> String?
+
+    /**
+     * Gracefully close the mediator connection (the TSP websocket).
+     */
+    func shutdown() async
+}
+
+/**
+ * A live TSP session to a mediator, scoped to one holder identity.
+ */
+open class TspMediatorSession:
+    TspMediatorSessionProtocol
+{
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    // Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+    public required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public init(noPointer _: NoPointer) {
+        pointer = nil
+    }
+
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_vta_mobile_core_fn_clone_tspmediatorsession(self.pointer, $0) }
+    }
+
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_vta_mobile_core_fn_free_tspmediatorsession(pointer, $0) }
+    }
+
+    /**
+     * Connect the holder's TSP websocket to `mediator_did` and open delivery.
+     *
+     * - `holder_did`: the holder's `did:key`.
+     * - `holder_signing_private_ed25519`: the holder's 32-byte Ed25519 seed
+     * (the key behind its `did:key`). It stays in the engine; only derived
+     * TSP secrets reach the client.
+     * - `mediator_did`: the mediator to connect through — the VTA's `#tsp`
+     * service endpoint (the same mediator the VTA is a local account on).
+     *
+     * Unlike [`MediatorSession::connect`](crate::mediator::MediatorSession),
+     * no `vta_did` is needed: a TSP receive session takes whatever the mediator
+     * delivers to this holder and doesn't gate on a conversing peer. The peer
+     * DID becomes relevant only for the reply/send path.
+     */
+    public static func connect(holderDid: String, holderSigningPrivateEd25519: Data, mediatorDid: String) async throws -> TspMediatorSession {
+        return
+            try await uniffiRustCallAsync(
+                rustFutureFunc: {
+                    uniffi_vta_mobile_core_fn_constructor_tspmediatorsession_connect(FfiConverterString.lower(holderDid), FfiConverterData.lower(holderSigningPrivateEd25519), FfiConverterString.lower(mediatorDid))
+                },
+                pollFunc: ffi_vta_mobile_core_rust_future_poll_pointer,
+                completeFunc: ffi_vta_mobile_core_rust_future_complete_pointer,
+                freeFunc: ffi_vta_mobile_core_rust_future_free_pointer,
+                liftFunc: FfiConverterTypeTspMediatorSession.lift,
+                errorHandler: FfiConverterTypeFfiError.lift
+            )
+    }
+
+    /**
+     * Wait up to `timeout_secs` for the next inbound TSP message from the
+     * mediator. Returns the unpacked Trust-Task document as JSON — the phone
+     * parses it exactly as it parses a DIDComm-delivered one (its own
+     * `type`/`issuer` fields), with the difference that TSP carries the inner
+     * document directly rather than inside a DIDComm envelope's `body`. Returns
+     * `None` if nothing arrived within the timeout. Call again to keep polling.
+     */
+    open func receiveNext(timeoutSecs: UInt64) async throws -> String? {
+        return
+            try await uniffiRustCallAsync(
+                rustFutureFunc: {
+                    uniffi_vta_mobile_core_fn_method_tspmediatorsession_receive_next(
+                        self.uniffiClonePointer(),
+                        FfiConverterUInt64.lower(timeoutSecs)
+                    )
+                },
+                pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
+                completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
+                freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
+                liftFunc: FfiConverterOptionString.lift,
+                errorHandler: FfiConverterTypeFfiError.lift
+            )
+    }
+
+    /**
+     * Gracefully close the mediator connection (the TSP websocket).
+     */
+    open func shutdown() async {
+        return
+            try! await uniffiRustCallAsync(
+                rustFutureFunc: {
+                    uniffi_vta_mobile_core_fn_method_tspmediatorsession_shutdown(
+                        self.uniffiClonePointer()
+                    )
+                },
+                pollFunc: ffi_vta_mobile_core_rust_future_poll_void,
+                completeFunc: ffi_vta_mobile_core_rust_future_complete_void,
+                freeFunc: ffi_vta_mobile_core_rust_future_free_void,
+                liftFunc: { $0 },
+                errorHandler: nil
+            )
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTspMediatorSession: FfiConverter {
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = TspMediatorSession
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> TspMediatorSession {
+        return TspMediatorSession(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: TspMediatorSession) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TspMediatorSession {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if ptr == nil {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: TspMediatorSession, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTspMediatorSession_lift(_ pointer: UnsafeMutableRawPointer) throws -> TspMediatorSession {
+    return try FfiConverterTypeTspMediatorSession.lift(pointer)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTspMediatorSession_lower(_ value: TspMediatorSession) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeTspMediatorSession.lower(value)
+}
+
+/**
  * The envelope + echo fields for an approve-response. `id` and `issued_at` are
  * supplied by the native layer (which owns identifiers and the clock), keeping
  * these builders pure and deterministic.
@@ -4258,10 +4451,19 @@ private var initializationResult: InitializationResult = {
     if uniffi_vta_mobile_core_checksum_method_mediatorsession_shutdown() != 60334 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_vta_mobile_core_checksum_method_tspmediatorsession_receive_next() != 32079 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_vta_mobile_core_checksum_method_tspmediatorsession_shutdown() != 4555 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_vta_mobile_core_checksum_constructor_didcommsession_new() != 3414 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_constructor_mediatorsession_connect() != 6555 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_vta_mobile_core_checksum_constructor_tspmediatorsession_connect() != 23067 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_method_signer_did() != 10383 {
