@@ -36,6 +36,9 @@ struct ContentView: View {
         .sheet(item: Binding(get: { model.pendingApprovals.first }, set: { _ in })) { pending in
             ReviewSheet(pending: pending, model: model, remaining: model.pendingApprovals.count)
         }
+        .sheet(item: Binding(get: { model.pendingConsents.first }, set: { _ in })) { pending in
+            TaskConsentSheet(pending: pending, model: model, remaining: model.pendingConsents.count)
+        }
         .preferredColorScheme(themeManager.theme.preferredColorScheme)
         .onAppear {
             LogStore.shared.start()
