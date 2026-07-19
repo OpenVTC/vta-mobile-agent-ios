@@ -1,5 +1,6 @@
 import SwiftUI
 import VtaMobileAgent
+import VtaMobileCore
 
 /// The consent gate for a **task-consent** ask — the device acting as a second
 /// approving device for a privileged Trust Task (e.g. a delegated `did:webvh`
@@ -23,7 +24,7 @@ struct TaskConsentSheet: View {
         "Not right now",
     ]
 
-    private var request: VtaMobileAgent.TaskConsentRequest { pending.request }
+    private var request: TaskConsentRequest { pending.request }
     private var isDestructive: Bool { request.sideEffects == "destructive" }
 
     var body: some View {

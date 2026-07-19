@@ -538,7 +538,7 @@ final class AgentModel: ObservableObject {
 
     /// Post a time-sensitive notification for a pending task-consent, keyed by
     /// `payloadDigest` so concurrent asks each get their own.
-    func notifyPendingConsent(_ request: VtaMobileAgent.TaskConsentRequest) {
+    func notifyPendingConsent(_ request: TaskConsentRequest) {
         let content = UNMutableNotificationContent()
         content.title = "Approval requested"
         content.body =
@@ -827,7 +827,7 @@ struct PendingConsent: Identifiable {
     /// The raw `task-consent/request` document (the DIDComm body) — re-parsed and
     /// re-sent verbatim so the decision binds to exactly what was shown.
     let rawDoc: String
-    let request: VtaMobileAgent.TaskConsentRequest
+    let request: TaskConsentRequest
     /// The line to show/record — the first effect, else static consequence text.
     var summary: String {
         request.effects.first?.summary
