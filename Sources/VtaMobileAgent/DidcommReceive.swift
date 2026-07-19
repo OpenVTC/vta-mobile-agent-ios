@@ -62,6 +62,32 @@ extension VtaMobileAgent {
         return nil  // some other traffic (e.g. a granted notice for a requester) — ignore
     }
 
+    /// TSP counterpart of ``nextInbound(session:timeoutSecs:)``. TSP carries the
+    /// Trust-Task document **directly** rather than inside a DIDComm envelope's
+    /// `body`, so the string `receiveNext` returns *is* the document — there is
+    /// no `body` to unwrap. The classifiers and the returned tags are otherwise
+    /// identical, so the caller dispatches `.stepUp` / `.taskConsent` the same
+    /// way regardless of transport.
+    ///
+    /// The TSP session (ATM) has already proven the sender VID and decrypted
+    /// under the holder key, so the document is authenticated plaintext here,
+    /// exactly as with DIDComm authcrypt.
+    public static func nextInboundTsp(
+        session: TspMediatorSession,
+        timeoutSecs: UInt64 = 30
+    ) async throws -> InboundRequest? {
+        guard let doc = try await session.receiveNext(timeoutSecs: timeoutSecs) else {
+            return nil
+        }
+        if isStepUpApproveRequest(doc) {
+            return .stepUp(doc)
+        }
+        if isTaskConsentRequest(doc) {
+            return .taskConsent(doc)
+        }
+        return nil  // other traffic — ignore
+    }
+
     /// Pull the next inbound message off a connected `MediatorSession` (waiting
     /// up to `timeoutSecs`) and, if it carries a step-up approve-request,
     /// approve it. Returns the outcome, `nil` if nothing arrived in time or the

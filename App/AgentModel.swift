@@ -47,6 +47,16 @@ final class AgentModel: ObservableObject {
         didSet { UserDefaults.standard.set(pushEnabled, forKey: "pnm.pushEnabled") }
     }
 
+    /// Use TSP (not DIDComm) for the mediator inbox. One transport at a time: the
+    /// one-socket-per-DID rule (ADR 0005) means the holder can't hold both
+    /// mediator sockets, so this picks which one the listen loop opens — it does
+    /// not run alongside DIDComm. Default off; the VTA pushes over DIDComm today,
+    /// so flip this on to receive the same step-up / task-consent over TSP.
+    /// Takes effect on the next (re)connect of the listener.
+    @Published var useTsp = false {
+        didSet { UserDefaults.standard.set(useTsp, forKey: "pnm.useTsp") }
+    }
+
     // Test-tab scratch.
     @Published var pastedApproveRequest = ""
 
@@ -79,6 +89,7 @@ final class AgentModel: ObservableObject {
     private var identity: HolderIdentity?
     private var tokens: AuthTokens?
     private var mediatorSession: MediatorSession?
+    private var tspSession: TspMediatorSession?
     private var listenSupervisor: Task<Void, Never>?
     private var keepAliveTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
@@ -88,6 +99,7 @@ final class AgentModel: ObservableObject {
     init() {
         autoConnectEnabled = (UserDefaults.standard.object(forKey: "pnm.autoConnect") as? Bool) ?? true
         pushEnabled = UserDefaults.standard.bool(forKey: "pnm.pushEnabled")
+        useTsp = UserDefaults.standard.bool(forKey: "pnm.useTsp")
     }
 
     // MARK: Derived presentation state
@@ -587,30 +599,57 @@ final class AgentModel: ObservableObject {
                     continue
                 }
                 do {
-                    let session = try await identity.connectMediator(
-                        vtaDid: did, mediatorDid: mediator)
-                    mediatorSession = session
-                    listening = true
-                    connectionError = nil
-                    stepUpStatus = "👂 Listening for step-up requests…"
-                    backoff = 1
-                    while !Task.isCancelled {
-                        // Pull the next request WITHOUT acting — so an AI ask that
-                        // carries a structured authorization context, or a
-                        // task-consent approval, is surfaced for the operator's
-                        // Approve/Deny instead of auto-ratified.
-                        guard let inbound = try await VtaMobileAgent.nextInbound(session: session)
-                        else { continue }  // timeout / other traffic → keep listening
-                        switch inbound {
-                        case .stepUp(let doc):
-                            await handleIncomingStepUp(
-                                doc: doc, url: url, did: did, token: token, identity: identity)
-                        case .taskConsent(let doc):
-                            await handleIncomingTaskConsent(
-                                doc: doc, url: url, did: did, token: token, identity: identity)
+                    // Transport is the operator's choice (one socket per DID —
+                    // ADR 0005), so open exactly one inbox. TSP carries the
+                    // Trust-Task document directly; DIDComm wraps it in an
+                    // envelope. Both surface the same tagged request, so the
+                    // dispatch below is identical either way.
+                    if useTsp {
+                        let session = try await identity.connectMediatorTsp(mediatorDid: mediator)
+                        tspSession = session
+                        listening = true
+                        connectionError = nil
+                        stepUpStatus = "👂 Listening for step-up / task-consent over TSP…"
+                        backoff = 1
+                        while !Task.isCancelled {
+                            guard let inbound = try await VtaMobileAgent.nextInboundTsp(session: session)
+                            else { continue }  // timeout / other traffic → keep listening
+                            switch inbound {
+                            case .stepUp(let doc):
+                                await handleIncomingStepUp(
+                                    doc: doc, url: url, did: did, token: token, identity: identity)
+                            case .taskConsent(let doc):
+                                await handleIncomingTaskConsent(
+                                    doc: doc, url: url, did: did, token: token, identity: identity)
+                            }
                         }
+                        await session.shutdown()
+                    } else {
+                        let session = try await identity.connectMediator(
+                            vtaDid: did, mediatorDid: mediator)
+                        mediatorSession = session
+                        listening = true
+                        connectionError = nil
+                        stepUpStatus = "👂 Listening for step-up requests…"
+                        backoff = 1
+                        while !Task.isCancelled {
+                            // Pull the next request WITHOUT acting — so an AI ask that
+                            // carries a structured authorization context, or a
+                            // task-consent approval, is surfaced for the operator's
+                            // Approve/Deny instead of auto-ratified.
+                            guard let inbound = try await VtaMobileAgent.nextInbound(session: session)
+                            else { continue }  // timeout / other traffic → keep listening
+                            switch inbound {
+                            case .stepUp(let doc):
+                                await handleIncomingStepUp(
+                                    doc: doc, url: url, did: did, token: token, identity: identity)
+                            case .taskConsent(let doc):
+                                await handleIncomingTaskConsent(
+                                    doc: doc, url: url, did: did, token: token, identity: identity)
+                            }
+                        }
+                        await session.shutdown()
                     }
-                    await session.shutdown()
                 } catch {
                     if Task.isCancelled { break }
                     listening = false
@@ -631,8 +670,23 @@ final class AgentModel: ObservableObject {
             await session.shutdown()
         }
         mediatorSession = nil
+        if let session = tspSession {
+            await session.shutdown()
+        }
+        tspSession = nil
         listening = false
         if isAuthenticated { stepUpStatus = "Stopped listening." }
+    }
+
+    /// Re-open the inbox when the operator flips the transport (`useTsp`) while
+    /// already listening, so the change takes effect at once. The one-socket-
+    /// per-DID rule means we must drop the current mediator socket before
+    /// opening the other transport's. No-op when not listening — the next
+    /// `startListening` picks up the new transport on its own.
+    func restartListeningIfActive() async {
+        guard listenSupervisor != nil else { return }
+        await stopListening()
+        await startListening()
     }
 
     private func normalizedURL() -> URL? {

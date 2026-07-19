@@ -76,6 +76,17 @@ struct SettingsTab: View {
             .onChange(of: model.autoConnectEnabled) { on in
                 if on { model.autoConnectIfConfigured() }
             }
+            Toggle(isOn: $model.useTsp) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Receive over TSP").font(.subheadline)
+                    Text("Use TSP instead of DIDComm for the mediator inbox. One transport at a time — takes effect immediately.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .tint(.green)
+            .onChange(of: model.useTsp) { _ in
+                Task { await model.restartListeningIfActive() }
+            }
         }
     }
 

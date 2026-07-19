@@ -102,6 +102,22 @@ public final class HolderIdentity: Signer {
             vtaDid: vtaDid,
             mediatorDid: mediatorDid)
     }
+
+    /// TSP counterpart of ``connectMediator(vtaDid:mediatorDid:)``: open the
+    /// holder's **TSP** websocket to the mediator so the app can receive
+    /// VTA-pushed Trust Tasks over TSP instead of DIDComm. No `vtaDid` is needed
+    /// — a TSP receive session takes whatever the mediator delivers to this
+    /// holder and doesn't gate on a conversing peer.
+    ///
+    /// Note the one-socket-per-DID rule (ADR 0005): a holder can hold a DIDComm
+    /// *or* a TSP mediator socket, not both at once — the caller picks the
+    /// transport for its inbox rather than running both concurrently.
+    public func connectMediatorTsp(mediatorDid: String) async throws -> TspMediatorSession {
+        try await TspMediatorSession.connect(
+            holderDid: didKey,
+            holderSigningPrivateEd25519: privateKey.rawRepresentation,
+            mediatorDid: mediatorDid)
+    }
 }
 
 /// Minimal Keychain wrapper for a single generic-password item (the holder key).
