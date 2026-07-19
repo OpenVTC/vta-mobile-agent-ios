@@ -611,7 +611,21 @@ final class AgentModel: ObservableObject {
                         connectionError = nil
                         stepUpStatus = "👂 Listening for step-up / task-consent over TSP…"
                         backoff = 1
+                        // Tell the VTA this device is on TSP now, so its device-push
+                        // prefers TSP for us (learn-from-inbound). A receive-only
+                        // inbox sends nothing else, so this announce is the only
+                        // signal — best-effort, and re-announced below to stay inside
+                        // the VTA's reachability TTL.
+                        try? await session.announce(vtaDid: did, mediatorDid: mediator)
+                        var lastAnnounce = Date()
                         while !Task.isCancelled {
+                            // Re-announce well within the VTA's ~300s reachability
+                            // TTL so a long-lived inbox doesn't silently decay back to
+                            // DIDComm. Checked each loop turn (≤ the 30s recv poll).
+                            if Date().timeIntervalSince(lastAnnounce) >= 150 {
+                                try? await session.announce(vtaDid: did, mediatorDid: mediator)
+                                lastAnnounce = Date()
+                            }
                             guard let inbound = try await VtaMobileAgent.nextInboundTsp(session: session)
                             else { continue }  // timeout / other traffic → keep listening
                             switch inbound {

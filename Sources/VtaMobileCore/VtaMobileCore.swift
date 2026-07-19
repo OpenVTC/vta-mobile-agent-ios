@@ -925,6 +925,16 @@ public func FfiConverterTypeMediatorSession_lower(_ value: MediatorSession) -> U
  */
 public protocol TspMediatorSessionProtocol: AnyObject {
     /**
+     * Announce this holder's TSP reachability to `vta_did` (routed through
+     * `mediator_did`) so the VTA's device-push prefers TSP for this device
+     * (learn-from-inbound). Sends a session-less ping frame; the VTA records
+     * our proven DID and replies with a pong that `receive_next` harmlessly
+     * ignores. Call right after connecting the inbox, and periodically, so the
+     * VTA's reachability record for this device stays fresh.
+     */
+    func announce(vtaDid: String, mediatorDid: String) async throws
+
+    /**
      * Wait up to `timeout_secs` for the next inbound TSP message from the
      * mediator. Returns the unpacked Trust-Task document as JSON — the phone
      * parses it exactly as it parses a DIDComm-delivered one (its own
@@ -1017,6 +1027,31 @@ open class TspMediatorSession:
                 completeFunc: ffi_vta_mobile_core_rust_future_complete_pointer,
                 freeFunc: ffi_vta_mobile_core_rust_future_free_pointer,
                 liftFunc: FfiConverterTypeTspMediatorSession.lift,
+                errorHandler: FfiConverterTypeFfiError.lift
+            )
+    }
+
+    /**
+     * Announce this holder's TSP reachability to `vta_did` (routed through
+     * `mediator_did`) so the VTA's device-push prefers TSP for this device
+     * (learn-from-inbound). Sends a session-less ping frame; the VTA records
+     * our proven DID and replies with a pong that `receive_next` harmlessly
+     * ignores. Call right after connecting the inbox, and periodically, so the
+     * VTA's reachability record for this device stays fresh.
+     */
+    open func announce(vtaDid: String, mediatorDid: String) async throws {
+        return
+            try await uniffiRustCallAsync(
+                rustFutureFunc: {
+                    uniffi_vta_mobile_core_fn_method_tspmediatorsession_announce(
+                        self.uniffiClonePointer(),
+                        FfiConverterString.lower(vtaDid), FfiConverterString.lower(mediatorDid)
+                    )
+                },
+                pollFunc: ffi_vta_mobile_core_rust_future_poll_void,
+                completeFunc: ffi_vta_mobile_core_rust_future_complete_void,
+                freeFunc: ffi_vta_mobile_core_rust_future_free_void,
+                liftFunc: { $0 },
                 errorHandler: FfiConverterTypeFfiError.lift
             )
     }
@@ -4449,6 +4484,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_method_mediatorsession_shutdown() != 60334 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_vta_mobile_core_checksum_method_tspmediatorsession_announce() != 61543 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_method_tspmediatorsession_receive_next() != 32079 {
