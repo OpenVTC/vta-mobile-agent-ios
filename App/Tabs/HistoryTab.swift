@@ -56,6 +56,11 @@ struct EventRow: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
+                // Who the entry was about, named where the DID has a name — the
+                // row is dense, so the compact single-line form.
+                if let did = event.did {
+                    DidLabel(did: did, compact: true)
+                }
                 if showTime {
                     Text(event.date.formatted(date: .abbreviated, time: .standard))
                         .font(.caption2).foregroundStyle(.tertiary)

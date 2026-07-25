@@ -15,6 +15,8 @@ Package.swift                         SwiftPM manifest (pins the engine release)
 Sources/VtaMobileCore/                generated UniFFI Swift bindings (vendored)
 Sources/VtaMobileAgent/               agent façade over the engine
 Sources/VtaMobileAgent/VtaTransport.swift   DIDComm / TSP submission + TSP reply correlation
+Sources/VtaMobileAgent/DisplayName.swift    DID → agent name: trust rules + resolver cache
+App/DidLabel.swift                    the one way a DID is put on screen
 Tests/VtaMobileAgentTests/            on-simulator smoke test
 App/                                  reference SwiftUI sources for the app target
 .github/workflows/ci.yml              runs the smoke test on an iOS Simulator
@@ -81,6 +83,54 @@ a response carries `threadId = request.threadId ?? request.id`.
 `demoSelfStepUp` is gone: it provoked a `403` from an AAL2-gated endpoint, a
 challenge carried by an HTTP status, which the messaging transports have no
 equivalent for.
+
+## Agent names (how DIDs are displayed)
+
+The app shows DIDs where it has no choice — who is asking for a step-up, who
+delivered a task-consent request, which VTA it is bound to. A `did:webvh` in a
+phone caption is unreadable, and on an approval sheet unreadable means the
+operator is approving something they cannot identify.
+
+So every DID renders through **`DidLabel`** (or `DidNameNote` under an editable
+field), which shows the DID's *agent name* — a human-memorable
+`example.com/@alice` — over the shortened DID. Two rules hold everywhere:
+
+1. **The DID stays visible.** A name the operator cannot cross-check against an
+   identifier is a name they cannot audit, so the shortened DID always sits under
+   the name and the full DID is selectable. Never interpolate a bare DID into a
+   `Text` — use `DidLabel`.
+2. **An unverified claim is never shown as fact.** It renders amber with an
+   `[unverified]` tag via `DisplayName.rendered`, which is the only rendering
+   path. Don't reach for `DisplayName.name` when building UI text.
+
+**Why rule 2 exists.** A name is only safe to show because it *round-tripped*:
+the DID's document claimed it and resolving that name led back to the same DID.
+`alsoKnownAs` alone is self-asserted, so a hostile DID can claim
+`mybank.com/@treasury`, and printing that claim bare tells the operator — in an
+authoritative voice, on the one screen where they are about to approve something
+— that they are looking at their bank. The round trip happens in
+`vta_sdk::display_name`, and the engine hands this app only the *verdict*
+(`verified: Bool`); the check is deliberately not reimplemented in Swift, because
+two implementations of a spoofing defence would have to agree forever.
+
+`shortenDid` likewise delegates to the engine rather than porting the rule — the
+CLIs, the admin console and this app must abbreviate a DID identically, or an
+operator moving between them re-identifies every DID on the way across.
+`DisplayNameTests` re-asserts the shared vector table (whose authority is
+`shorten_did_matches_shared_vectors` in `vta-sdk`) so an engine bump that changes
+it fails here.
+
+Lookups cost a DID resolution plus an outbound fetch per claimed name, so
+`NameResolver` caches them (hits 6 h, misses 10 min — a miss expires sooner
+because the day names start being minted, a session-long negative cache would
+never notice) and collapses concurrent asks for the same DID into one round trip.
+Nothing blocks on a lookup: the shortened DID paints immediately and upgrades in
+place.
+
+**No DID publishes a name yet.** Nothing in the VTI workspace writes an
+`alsoKnownAs` entry today, so every lookup currently returns `None` and every
+surface shows a shortened DID. The seam is wired so that minting names lights the
+app up without a new release.
 
 ## Pinning / upgrading the engine
 

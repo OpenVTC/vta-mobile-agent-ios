@@ -42,15 +42,14 @@ struct ReviewSheet: View {
                     }
 
                     if let rp = pending.review.relyingParty {
-                        HStack(spacing: 6) {
-                            Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text("Requested by \(rp)").font(.caption.monospaced())
-                                Text("verified by your VTA").font(.caption2)
-                            }
-                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Requested by").font(.caption2).foregroundStyle(.secondary)
+                            // The name, if this DID has one that checks out, over
+                            // the DID itself — the operator has to be able to
+                            // audit one against the other before approving.
+                            DidLabel(did: rp, caption: "verified by your VTA")
                         }
-                        .font(.caption)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
                     Text(

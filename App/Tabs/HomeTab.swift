@@ -51,6 +51,13 @@ struct HomeTab: View {
                         : "Connected. Set a mediator DID in Settings to approve step-ups live.")
                         .font(.footnote).foregroundStyle(.secondary)
                         .padding(.top, 2)
+                    // Which VTA this device is actually bound to, named when it
+                    // has a name. Worth a line here: everything the agent
+                    // approves, it approves for this identity.
+                    if !model.vtaDid.trimmed.isEmpty {
+                        Divider().padding(.vertical, 2)
+                        DidLabel(did: model.vtaDid.trimmed, caption: "your VTA")
+                    }
                 }
             }
 

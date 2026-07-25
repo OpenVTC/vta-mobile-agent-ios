@@ -1304,6 +1304,88 @@ public func FfiConverterTypeTspMediatorSession_lower(_ value: TspMediatorSession
 }
 
 /**
+ * A name to show for a DID, plus the provenance the UI must not throw away.
+ *
+ * `verified == false` is a bare self-assertion. It is still returned — a DID
+ * *attempting* to present as somebody else is something the operator should
+ * see — but the app must qualify it (see `DisplayName.rendered` on the Swift
+ * side, which appends `[unverified]`). Never render `name` alone.
+ */
+public struct AgentName {
+    /**
+     * The claimed name, e.g. `example.com/@treasury`.
+     */
+    public var name: String
+    /**
+     * Whether the claim round-tripped back to this DID.
+     */
+    public var verified: Bool
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(
+        /* 
+         * The claimed name, e.g. `example.com/@treasury`.
+         */ name: String,
+        /* 
+            * Whether the claim round-tripped back to this DID.
+            */ verified: Bool
+    ) {
+        self.name = name
+        self.verified = verified
+    }
+}
+
+extension AgentName: Equatable, Hashable {
+    public static func == (lhs: AgentName, rhs: AgentName) -> Bool {
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.verified != rhs.verified {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(name)
+        hasher.combine(verified)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAgentName: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AgentName {
+        return
+            try AgentName(
+                name: FfiConverterString.read(from: &buf),
+                verified: FfiConverterBool.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: AgentName, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterBool.write(value.verified, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAgentName_lift(_ buf: RustBuffer) throws -> AgentName {
+    return try FfiConverterTypeAgentName.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAgentName_lower(_ value: AgentName) -> RustBuffer {
+    return FfiConverterTypeAgentName.lower(value)
+}
+
+/**
  * The envelope + echo fields for an approve-response. `id` and `issued_at` are
  * supplied by the native layer (which owns identifiers and the clock), keeping
  * these builders pure and deterministic.
@@ -3879,6 +3961,30 @@ private struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterOptionTypeAgentName: FfiConverterRustBuffer {
+    typealias SwiftType = AgentName?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeAgentName.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeAgentName.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterOptionTypeWakeHandle: FfiConverterRustBuffer {
     typealias SwiftType = WakeHandle?
 
@@ -4455,6 +4561,35 @@ public func parseWhoamiResponse(json: String) throws -> SessionInfo {
 }
 
 /**
+ * The agent name a DID's document claims, if any, with the round trip already
+ * performed.
+ *
+ * Returns `None` when the DID does not resolve, claims no agent name, or the
+ * lookup fails. **Infallible on purpose**: this is a display helper, and an
+ * unreachable name server must degrade to showing the DID, never fail the
+ * operator's approval. That mirrors [`agent_name::lookup`], which swallows its
+ * own errors for the same reason.
+ *
+ * Costs one DID resolution plus up to
+ * [`agent_name::MAX_CLAIMS_CHECKED`] outbound fetches, so the app resolves
+ * lazily — per DID actually on screen — and caches the result rather than
+ * calling this on every render.
+ */
+public func resolveAgentName(did: String) async -> AgentName? {
+    return
+        try! await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_func_resolve_agent_name(FfiConverterString.lower(did))
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeAgentName.lift,
+            errorHandler: nil
+        )
+}
+
+/**
  * Resolve a DID to its DID Document, returned as JSON.
  *
  * Used to find a peer's verification keys (to verify a relying party's step-up
@@ -4494,6 +4629,24 @@ public func resolveVtaEndpoints(did: String) async throws -> VtaEndpoints {
             liftFunc: FfiConverterTypeVtaEndpoints.lift,
             errorHandler: FfiConverterTypeFfiError.lift
         )
+}
+
+/**
+ * Abbreviate a DID for a narrow phone caption, keeping the part that
+ * identifies it.
+ *
+ * Exported rather than ported so the phone, the CLIs and the admin console
+ * cannot drift: an operator moves between all three looking at the same
+ * community, and a DID abbreviated two ways is one they must re-identify on
+ * every switch. See [`display_name::shorten_did`] for the rule and the shared
+ * vector table that is its authority.
+ */
+public func shortenDid(did: String) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_vta_mobile_core_fn_func_shorten_did(
+            FfiConverterString.lower(did), $0
+        )
+    })
 }
 
 /**
@@ -4613,10 +4766,16 @@ private var initializationResult: InitializationResult = {
     if uniffi_vta_mobile_core_checksum_func_parse_whoami_response() != 41103 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_vta_mobile_core_checksum_func_resolve_agent_name() != 49028 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_vta_mobile_core_checksum_func_resolve_did() != 1426 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_func_resolve_vta_endpoints() != 19323 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_vta_mobile_core_checksum_func_shorten_did() != 29999 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_func_sign_challenge() != 49514 {

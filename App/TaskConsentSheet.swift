@@ -126,15 +126,11 @@ struct TaskConsentSheet: View {
 
     @ViewBuilder private var requester: some View {
         if let issuer = request.issuer {
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Delivered by \(issuer)").font(.caption.monospaced())
-                    Text("your VTA").font(.caption2)
-                }
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Delivered by").font(.caption2).foregroundStyle(.secondary)
+                DidLabel(did: issuer, caption: "your VTA")
             }
-            .font(.caption)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
