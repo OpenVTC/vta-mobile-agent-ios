@@ -36,16 +36,16 @@ extension VtaMobileAgent {
     /// echoing the request's `challenge` + `payloadDigest`, and return the
     /// executor's status.
     ///
-    /// `accessToken` must be a token for *this holder's* session — the VTA
-    /// authenticates the transport, but the approver's authority is the decision
-    /// proof, so this device always signs as its own holder DID.
+    /// The approver's authority is the decision proof, so this device always
+    /// signs as its own holder DID. `transport` proves the *sender* to the VTA
+    /// (authcrypt or TSP), which is what authorizes the submission — there is no
+    /// bearer token.
     @discardableResult
     public static func approveTaskConsent(
         request doc: String,
-        vtaURL: URL,
+        transport: VtaTransport,
         vtaDid: String,
-        identity: HolderIdentity,
-        accessToken: String
+        identity: HolderIdentity
     ) async throws -> TaskConsentOutcome {
         let request = try parseTaskConsentRequest(json: doc)
         let draft = TaskConsentDecisionDraft(
@@ -57,9 +57,7 @@ extension VtaMobileAgent {
             payloadDigest: request.payloadDigest)
         let decisionDoc = try buildTaskConsentDecisionDidSigned(draft: draft, signer: identity)
 
-        let client = VtaRestClient(baseURL: vtaURL)
-        let body = try await client.post(
-            path: "/api/trust-tasks", body: decisionDoc, bearer: accessToken)
+        let body = try await transport.submit(decisionDoc)
         let status = Self.taskConsentJSONString(in: body, path: ["payload", "status"]) ?? "granted"
         return TaskConsentOutcome(payloadDigest: request.payloadDigest, status: status)
     }
@@ -72,10 +70,9 @@ extension VtaMobileAgent {
     public static func denyTaskConsent(
         request doc: String,
         reason: String,
-        vtaURL: URL,
+        transport: VtaTransport,
         vtaDid: String,
-        identity: HolderIdentity,
-        accessToken: String
+        identity: HolderIdentity
     ) async throws -> TaskConsentOutcome {
         let request = try parseTaskConsentRequest(json: doc)
         let draft = TaskConsentDecisionDraft(
@@ -88,9 +85,7 @@ extension VtaMobileAgent {
         let decisionDoc = try buildTaskConsentDecisionDenied(
             draft: draft, reason: reason, signer: identity)
 
-        let client = VtaRestClient(baseURL: vtaURL)
-        let body = try await client.post(
-            path: "/api/trust-tasks", body: decisionDoc, bearer: accessToken)
+        let body = try await transport.submit(decisionDoc)
         let status = Self.taskConsentJSONString(in: body, path: ["payload", "status"]) ?? "denied"
         return TaskConsentOutcome(payloadDigest: request.payloadDigest, status: status)
     }

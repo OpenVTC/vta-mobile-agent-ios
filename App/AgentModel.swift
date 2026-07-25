@@ -6,12 +6,19 @@ import VtaMobileAgent
 import VtaMobileCore
 
 /// UI-facing state for the agent. Owns the device holder identity and drives the
-/// REST auth flow + the live DIDComm approver loop on the `VtaMobileAgent` façade.
+/// messaging approver loop on the `VtaMobileAgent` façade.
+///
+/// **No REST, no tokens.** The agent reaches its VTA only over the mediator —
+/// DIDComm or TSP. The VTA proves the sender cryptographically on every message
+/// and derives authorization from that DID (intrinsic-sender auth), so there is
+/// no challenge/authenticate exchange, no bearer token and nothing to refresh.
+/// "Connected" therefore means *the inbox is open and the VTA answered a
+/// `whoami` over it*.
 ///
 /// Design goal: **everything auto and recoverable.** Once configured, the agent
-/// auto-connects on launch, keeps the session alive (token auto-refresh), and
-/// supervises the mediator listen loop with exponential-backoff reconnects, so a
-/// dropped network/VTA recovers without any user action.
+/// auto-connects on launch and supervises the listen loop with
+/// exponential-backoff reconnects, so a dropped network/VTA recovers without any
+/// user action.
 @MainActor
 final class AgentModel: ObservableObject {
     /// Shared instance so the `AppDelegate` (APNs callbacks) and the SwiftUI views
@@ -19,13 +26,13 @@ final class AgentModel: ObservableObject {
     static let shared = AgentModel()
 
     // Configuration (persisted; see ConnectionConfig).
-    @Published var vtaURL = ""
     @Published var vtaDid = ""
     @Published var mediatorDid = ""
     /// Push gateway base URL (HTTPS) — where `push/register` is POSTed.
     @Published var gatewayUrl = ""
 
-    // Connection / auth state.
+    // Connection state. `isAuthenticated` now means "the VTA answered over the
+    // inbox" — there is no token to hold, so a successful `whoami` is the proof.
     @Published var isAuthenticated = false
     /// Background connect in progress (distinct from `busy`, which gates explicit
     /// user actions — auto-connect must not lock the whole UI).
@@ -87,11 +94,13 @@ final class AgentModel: ObservableObject {
     }
 
     private var identity: HolderIdentity?
-    private var tokens: AuthTokens?
     private var mediatorSession: MediatorSession?
     private var tspSession: TspMediatorSession?
+    /// Correlates VTA replies arriving on the shared TSP inbox back to the
+    /// `submit` awaiting them. Owned here because the listen loop (the only
+    /// reader of the socket) and `transport` (the sender) must share one.
+    private let tspRouter = TspReplyRouter()
     private var listenSupervisor: Task<Void, Never>?
-    private var keepAliveTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
 
     private var trimmedDid: String { vtaDid.trimmed }
@@ -104,7 +113,28 @@ final class AgentModel: ObservableObject {
 
     // MARK: Derived presentation state
 
-    var isConfigured: Bool { !vtaURL.trimmed.isEmpty && !trimmedDid.isEmpty }
+    /// A mediator DID is now as load-bearing as the VTA DID: it is the *only*
+    /// way to reach the VTA, where it used to be optional next to a REST URL.
+    var isConfigured: Bool { !trimmedDid.isEmpty && !mediatorDid.trimmed.isEmpty }
+
+    /// How Trust Task documents reach the VTA, over whichever inbox is currently
+    /// open. `nil` until the listener has connected — which is exactly when the
+    /// agent has no way to talk to its VTA.
+    ///
+    /// The `useTsp` toggle picks the socket (one per DID, ADR 0005), so the
+    /// transport follows whichever session the listen loop actually opened
+    /// rather than the flag, avoiding a window where they disagree.
+    private var transport: VtaTransport? {
+        if let session = tspSession {
+            return TspTransport(
+                session: session, vtaDid: trimmedDid, mediatorDid: mediatorDid.trimmed,
+                router: tspRouter)
+        }
+        if let session = mediatorSession {
+            return DidcommTransport(session: session)
+        }
+        return nil
+    }
 
     /// Glanceable status driving the always-visible pill + Home hero.
     var phase: ConnectionPhase {
@@ -143,7 +173,9 @@ final class AgentModel: ObservableObject {
     /// Registering this device as the operator's delegated approver is a
     /// follow-up once connected (needs a live VTA).
     func applyPairing(_ p: PairingPayload) {
-        vtaURL = p.vtaURL
+        // `p.vtaURL` is deliberately ignored: the agent no longer speaks REST. The
+        // field is optional and only still parsed so codes minted for older
+        // clients scan (see `PairingPayload`).
         vtaDid = p.vtaDID
         if let m = p.mediatorDID { mediatorDid = m }
         if let g = p.gatewayURL { gatewayUrl = g }
@@ -155,13 +187,16 @@ final class AgentModel: ObservableObject {
 
     // MARK: Connect / disconnect (auto + recoverable)
 
-    /// Authenticate and bring the agent fully online: refresh-keepalive, the
-    /// supervised mediator listener, and (if previously enabled) push re-arm. A
-    /// manual call re-arms auto-connect; an `auto` call schedules a backoff retry
-    /// on failure.
+    /// Bring the agent online: open the mediator inbox, confirm the VTA answers
+    /// over it, and (if previously enabled) re-arm push. A manual call re-arms
+    /// auto-connect; an `auto` call schedules a backoff retry on failure.
+    ///
+    /// The order matters and is the inverse of the old REST flow: the inbox must
+    /// be open *first*, because it is now the only channel — the `whoami` that
+    /// verifies the connection travels over it.
     func connect(auto: Bool = false) async {
-        guard let identity, let url = normalizedURL(), isConfigured else {
-            connectionError = "Enter the VTA URL + DID in Settings first."
+        guard identity != nil, isConfigured else {
+            connectionError = "Enter the VTA DID + mediator DID in Settings first."
             status = connectionError!
             return
         }
@@ -171,16 +206,28 @@ final class AgentModel: ObservableObject {
         connectionError = nil
         if !auto { status = "Connecting to your VTA…" }
         defer { connecting = false }
+
+        await startListening()
+        guard let transport, let identity else {
+            isAuthenticated = false
+            connectionError = "Couldn't open the mediator inbox."
+            status = "❌ \(connectionError!)"
+            recordEvent(.error, "Connection failed", connectionError)
+            if auto || autoConnectEnabled { scheduleReconnect() }
+            return
+        }
         do {
-            let issued = try await VtaMobileAgent.authenticate(
-                vtaURL: url, vtaDid: trimmedDid, identity: identity)
-            tokens = issued
+            // Proves three things at once: the inbox round-trips, the VTA is up,
+            // and this device's did:key is enrolled in its ACL. An unenrolled
+            // device fails here — the replacement for the old REST 401.
+            let info = try await VtaMobileAgent.whoami(
+                transport: transport, vtaDid: trimmedDid, identity: identity)
             isAuthenticated = true
             persistConnection()
-            status = "✅ Connected — acr \(issued.acr ?? "—"), session valid \(issued.expiresIn)s"
-            recordEvent(.auth, "Authenticated", "acr \(issued.acr ?? "—") · token \(issued.expiresIn)s")
-            startKeepAlive()
-            if !mediatorDid.trimmed.isEmpty { await startListening() }
+            let roles = info.roles.isEmpty ? "—" : info.roles.joined(separator: ", ")
+            whoamiSummary = "session \(info.sessionId)\nacr \(info.acr ?? "—") · roles: \(roles)"
+            status = "✅ Connected over \(useTsp ? "TSP" : "DIDComm") — acr \(info.acr ?? "—")"
+            recordEvent(.auth, "Connected", "acr \(info.acr ?? "—") · roles: \(roles)")
             if pushEnabled { UIApplication.shared.registerForRemoteNotifications() }
         } catch {
             isAuthenticated = false
@@ -196,9 +243,7 @@ final class AgentModel: ObservableObject {
     func disconnect() async {
         autoConnectEnabled = false
         reconnectTask?.cancel(); reconnectTask = nil
-        keepAliveTask?.cancel(); keepAliveTask = nil
         await stopListening()
-        tokens = nil
         isAuthenticated = false
         whoamiSummary = nil
         status = "Disconnected. Tap Connect to bring the agent back online."
@@ -222,52 +267,16 @@ final class AgentModel: ObservableObject {
         }
     }
 
-    /// A valid access token, re-authenticating transparently if we don't have one.
-    private func currentAccessToken() async -> String? {
-        if let t = tokens { return t.accessToken }
-        guard let url = normalizedURL(), let identity, !trimmedDid.isEmpty else { return nil }
-        if let issued = try? await VtaMobileAgent.authenticate(
-            vtaURL: url, vtaDid: trimmedDid, identity: identity)
-        {
-            tokens = issued
-            isAuthenticated = true
-            startKeepAlive()
-            return issued.accessToken
-        }
-        return nil
-    }
-
-    /// Re-authenticate ahead of token expiry so the session never lapses.
-    private func startKeepAlive() {
-        keepAliveTask?.cancel()
-        guard let exp = tokens?.expiresIn else { return }
-        let lead = max(30, Int(Double(exp) * 0.8))
-        keepAliveTask = Task { [self] in
-            try? await Task.sleep(nanoseconds: UInt64(lead) * 1_000_000_000)
-            guard !Task.isCancelled else { return }
-            await refreshSession()
-        }
-    }
-
-    private func refreshSession() async {
-        guard let url = normalizedURL(), let identity, !trimmedDid.isEmpty else { return }
-        do {
-            let issued = try await VtaMobileAgent.authenticate(
-                vtaURL: url, vtaDid: trimmedDid, identity: identity)
-            tokens = issued
-            isAuthenticated = true
-            log("Session refreshed (acr \(issued.acr ?? "—"))")
-            startKeepAlive()
-        } catch {
-            log("Session refresh failed: \(error.localizedDescription)")
-            scheduleReconnect()
-        }
-    }
+    // Token machinery (`currentAccessToken` / `startKeepAlive` / `refreshSession`)
+    // is gone with REST. Intrinsic-sender auth has no token to hold, so there is
+    // no expiry to race and nothing to refresh — the holder key is the
+    // credential on every single message.
 
     // MARK: VTA discovery
 
-    /// Resolve the VTA's DID and fill the REST URL + mediator DID from its DID
-    /// document, so the operator enters only the DID.
+    /// Resolve the VTA's DID and fill the mediator DID from its DID document, so
+    /// the operator enters only the DID. The document's `restBaseUrl` is ignored
+    /// — the agent has no REST path to use it on.
     func resolveFromDid() async {
         let did = trimmedDid
         guard !did.isEmpty else {
@@ -279,21 +288,15 @@ final class AgentModel: ObservableObject {
         status = "Resolving endpoints from \(did)…"
         do {
             let ep = try await resolveVtaEndpoints(did: did)
-            var filled: [String] = []
-            if let rest = ep.restBaseUrl, !rest.isEmpty {
-                vtaURL = rest
-                filled.append("URL")
-            }
             if let med = ep.mediatorDid, !med.isEmpty {
                 mediatorDid = med
-                filled.append("mediator")
+                status = "✅ Filled mediator from the DID."
+                persistConnection()
+            } else {
+                status =
+                    "Resolved the DID, but it advertises no #vta-didcomm service — "
+                    + "enter the mediator DID manually."
             }
-            status =
-                filled.isEmpty
-                ? "Resolved the DID, but it advertises no #vta-rest / #vta-didcomm "
-                    + "service — enter the URL / mediator manually."
-                : "✅ Filled \(filled.joined(separator: " + ")) from the DID."
-            if filled.contains("URL") { persistConnection() }
         } catch {
             status = "❌ Couldn't resolve \(did) — \(error.localizedDescription)"
         }
@@ -302,8 +305,7 @@ final class AgentModel: ObservableObject {
     // MARK: Session introspection
 
     func whoami() async {
-        guard let identity, let url = normalizedURL() else { return }
-        guard let token = await currentAccessToken() else {
+        guard let identity, let transport else {
             whoamiSummary = "Not connected."
             return
         }
@@ -311,7 +313,7 @@ final class AgentModel: ObservableObject {
         defer { busy = false }
         do {
             let info = try await VtaMobileAgent.whoami(
-                vtaURL: url, vtaDid: trimmedDid, identity: identity, accessToken: token)
+                transport: transport, vtaDid: trimmedDid, identity: identity)
             let roles = info.roles.isEmpty ? "—" : info.roles.joined(separator: ", ")
             whoamiSummary = "session \(info.sessionId)\nacr \(info.acr ?? "—") · roles: \(roles)"
         } catch {
@@ -321,35 +323,16 @@ final class AgentModel: ObservableObject {
 
     // MARK: Step-up (test surfaces)
 
-    /// Self-contained demo: provoke + approve a step-up on this device's own
-    /// session, then reflect the elevated `acr` via whoami.
-    func demoStepUp() async {
-        guard let identity, let url = normalizedURL(), !trimmedDid.isEmpty,
-            let token = await currentAccessToken()
-        else {
-            stepUpStatus = "Connect first."
-            return
-        }
-        busy = true
-        defer { busy = false }
-        stepUpStatus = "Stepping up this session…"
-        do {
-            let outcome = try await VtaMobileAgent.demoSelfStepUp(
-                vtaURL: url, vtaDid: trimmedDid, identity: identity, accessToken: token)
-            stepUpStatus = "✅ Elevated to \(outcome.grantedAcr ?? "—")"
-            recordEvent(.approval, "Self step-up", "→ \(outcome.grantedAcr ?? "—")")
-            await whoami()
-        } catch {
-            stepUpStatus = "❌ Step-up failed — \(error.localizedDescription)"
-        }
-    }
+    // `demoStepUp` is gone with REST: it worked by poking an AAL2-gated endpoint
+    // so the VTA would answer 403 with an approve-request for our own session — a
+    // challenge carried by an HTTP status, which the messaging transports have no
+    // equivalent for. Exercise the loop by triggering a delegated step-up at the
+    // VTA and letting it push the request here, which is the real sign-in path.
 
     /// Proxied approver: ratify a step-up whose approve-request was relayed here
     /// from another device (paste the VTA `403` body or the bare document).
     func approvePasted() async {
-        guard let identity, let url = normalizedURL(), !trimmedDid.isEmpty,
-            let token = await currentAccessToken()
-        else {
+        guard let identity, let transport, !trimmedDid.isEmpty else {
             stepUpStatus = "Connect first."
             return
         }
@@ -363,8 +346,8 @@ final class AgentModel: ObservableObject {
         stepUpStatus = "Approving…"
         do {
             let outcome = try await VtaMobileAgent.approveStepUp(
-                approveRequest: request, vtaURL: url, vtaDid: trimmedDid,
-                identity: identity, accessToken: token)
+                approveRequest: request, transport: transport, vtaDid: trimmedDid,
+                identity: identity)
             stepUpStatus = "✅ Approved — session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")"
             recordEvent(.approval, "Approved (pasted)",
                 "session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")")
@@ -380,7 +363,7 @@ final class AgentModel: ObservableObject {
     /// context is surfaced for the operator's consent; a plain login-elevation
     /// step-up (no context) is auto-ratified.
     private func handleIncomingStepUp(
-        doc: String, url: URL, did: String, token: String, identity: HolderIdentity
+        doc: String, transport: VtaTransport, did: String, identity: HolderIdentity
     ) async {
         do {
             let review = try VtaMobileAgent.inspect(approveRequest: doc)
@@ -393,8 +376,8 @@ final class AgentModel: ObservableObject {
                 notifyPendingApproval(review)
             } else {
                 let outcome = try await VtaMobileAgent.approveStepUp(
-                    approveRequest: doc, vtaURL: url, vtaDid: did,
-                    identity: identity, accessToken: token)
+                    approveRequest: doc, transport: transport, vtaDid: did,
+                    identity: identity)
                 stepUpStatus =
                     "✅ Approved — session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")"
                 recordEvent(.approval, "Approved (live)",
@@ -415,22 +398,21 @@ final class AgentModel: ObservableObject {
         let pending =
             sessionId.flatMap { sid in pendingApprovals.first { $0.review.sessionId == sid } }
             ?? frontApproval
-        guard let pending, let identity, let url = normalizedURL(), !trimmedDid.isEmpty,
-            let token = await currentAccessToken()
+        guard let pending, let identity, let transport, !trimmedDid.isEmpty
         else { return }
         busy = true
         defer { busy = false }
         do {
             if approve {
                 _ = try await VtaMobileAgent.approveStepUp(
-                    approveRequest: pending.rawDoc, vtaURL: url, vtaDid: trimmedDid,
-                    identity: identity, accessToken: token)
+                    approveRequest: pending.rawDoc, transport: transport, vtaDid: trimmedDid,
+                    identity: identity)
                 stepUpStatus = "✅ Approved — \(pending.summary)"
                 recordEvent(.approval, "Approved", pending.summary)
             } else {
                 _ = try await VtaMobileAgent.denyStepUp(
-                    approveRequest: pending.rawDoc, reason: reason, vtaURL: url,
-                    vtaDid: trimmedDid, identity: identity, accessToken: token)
+                    approveRequest: pending.rawDoc, reason: reason, transport: transport,
+                    vtaDid: trimmedDid, identity: identity)
                 stepUpStatus = "🚫 Declined — \(pending.summary)"
                 recordEvent(.error, "Declined", pending.summary)
             }
@@ -484,9 +466,10 @@ final class AgentModel: ObservableObject {
     /// Queue an inbound `task-consent/request` for the operator. Unlike a plain
     /// login step-up there is no auto-ratify path: a privileged Trust Task always
     /// requires the human to see the effects and decide.
-    private func handleIncomingTaskConsent(
-        doc: String, url: URL, did: String, token: String, identity: HolderIdentity
-    ) async {
+    /// Queue an inbound task-consent for the operator. Takes no transport: it
+    /// only parses and queues — the signed decision is submitted later by
+    /// `resolveConsent`, which picks up whichever inbox is open then.
+    private func handleIncomingTaskConsent(doc: String) async {
         do {
             let request = try VtaMobileAgent.inspectTaskConsent(request: doc)
             // Dedupe by payloadDigest so a re-drain doesn't double-add.
@@ -511,22 +494,21 @@ final class AgentModel: ObservableObject {
         let pending =
             payloadDigest.flatMap { d in pendingConsents.first { $0.request.payloadDigest == d } }
             ?? frontConsent
-        guard let pending, let identity, let url = normalizedURL(), !trimmedDid.isEmpty,
-            let token = await currentAccessToken()
+        guard let pending, let identity, let transport, !trimmedDid.isEmpty
         else { return }
         busy = true
         defer { busy = false }
         do {
             if approve {
                 let outcome = try await VtaMobileAgent.approveTaskConsent(
-                    request: pending.rawDoc, vtaURL: url, vtaDid: trimmedDid,
-                    identity: identity, accessToken: token)
+                    request: pending.rawDoc, transport: transport, vtaDid: trimmedDid,
+                    identity: identity)
                 stepUpStatus = "✅ Approved — \(pending.summary) (\(outcome.status))"
                 recordEvent(.approval, "Approved task", pending.summary)
             } else {
                 _ = try await VtaMobileAgent.denyTaskConsent(
-                    request: pending.rawDoc, reason: reason, vtaURL: url,
-                    vtaDid: trimmedDid, identity: identity, accessToken: token)
+                    request: pending.rawDoc, reason: reason, transport: transport,
+                    vtaDid: trimmedDid, identity: identity)
                 stepUpStatus = "🚫 Declined — \(pending.summary)"
                 recordEvent(.error, "Declined task", pending.summary)
             }
@@ -581,8 +563,8 @@ final class AgentModel: ObservableObject {
     /// drop. Idempotent.
     func startListening() async {
         guard listenSupervisor == nil else { return }
-        guard let identity, let url = normalizedURL(), !trimmedDid.isEmpty else {
-            stepUpStatus = "Connect first."
+        guard let identity, !trimmedDid.isEmpty else {
+            stepUpStatus = "Set the VTA DID in Settings first."
             return
         }
         let mediator = mediatorDid.trimmed
@@ -594,10 +576,6 @@ final class AgentModel: ObservableObject {
         listenSupervisor = Task { [self] in
             var backoff: UInt64 = 1
             while !Task.isCancelled {
-                guard let token = await currentAccessToken() else {
-                    try? await Task.sleep(nanoseconds: 3_000_000_000)
-                    continue
-                }
                 do {
                     // Transport is the operator's choice (one socket per DID —
                     // ADR 0005), so open exactly one inbox. TSP carries the
@@ -607,6 +585,7 @@ final class AgentModel: ObservableObject {
                     if useTsp {
                         let session = try await identity.connectMediatorTsp(mediatorDid: mediator)
                         tspSession = session
+                        mediatorSession = nil  // `transport` must not see a stale DIDComm session
                         listening = true
                         connectionError = nil
                         stepUpStatus = "👂 Listening for step-up / task-consent over TSP…"
@@ -626,15 +605,21 @@ final class AgentModel: ObservableObject {
                                 try? await session.announce(vtaDid: did, mediatorDid: mediator)
                                 lastAnnounce = Date()
                             }
-                            guard let inbound = try await VtaMobileAgent.nextInboundTsp(session: session)
-                            else { continue }  // timeout / other traffic → keep listening
+                            // `router:` is essential now that we also *send* over
+                            // TSP — this loop owns the socket, so it is the only
+                            // thing that sees the VTA's replies to our own
+                            // submissions. Without it every submit would time out.
+                            guard
+                                let inbound = try await VtaMobileAgent.nextInboundTsp(
+                                    session: session, router: tspRouter)
+                            else { continue }  // timeout / reply / other traffic → keep listening
+                            guard let transport else { continue }
                             switch inbound {
                             case .stepUp(let doc):
                                 await handleIncomingStepUp(
-                                    doc: doc, url: url, did: did, token: token, identity: identity)
+                                    doc: doc, transport: transport, did: did, identity: identity)
                             case .taskConsent(let doc):
-                                await handleIncomingTaskConsent(
-                                    doc: doc, url: url, did: did, token: token, identity: identity)
+                                await handleIncomingTaskConsent(doc: doc)
                             }
                         }
                         await session.shutdown()
@@ -642,6 +627,7 @@ final class AgentModel: ObservableObject {
                         let session = try await identity.connectMediator(
                             vtaDid: did, mediatorDid: mediator)
                         mediatorSession = session
+                        tspSession = nil  // `transport` must not see a stale TSP session
                         listening = true
                         connectionError = nil
                         stepUpStatus = "👂 Listening for step-up requests…"
@@ -653,13 +639,13 @@ final class AgentModel: ObservableObject {
                             // Approve/Deny instead of auto-ratified.
                             guard let inbound = try await VtaMobileAgent.nextInbound(session: session)
                             else { continue }  // timeout / other traffic → keep listening
+                            guard let transport else { continue }
                             switch inbound {
                             case .stepUp(let doc):
                                 await handleIncomingStepUp(
-                                    doc: doc, url: url, did: did, token: token, identity: identity)
+                                    doc: doc, transport: transport, did: did, identity: identity)
                             case .taskConsent(let doc):
-                                await handleIncomingTaskConsent(
-                                    doc: doc, url: url, did: did, token: token, identity: identity)
+                                await handleIncomingTaskConsent(doc: doc)
                             }
                         }
                         await session.shutdown()
@@ -667,6 +653,20 @@ final class AgentModel: ObservableObject {
                 } catch {
                     if Task.isCancelled { break }
                     listening = false
+                    // Tear the dead session down before opening a replacement.
+                    // The throw skipped the `shutdown()` at the end of the inner
+                    // loop, and the engine warns loudly about a session dropped
+                    // without one — plus the mediator allows a single socket per
+                    // DID, so leaving the old one half-open invites the
+                    // reconnect to be evicted as a duplicate channel.
+                    if let stale = mediatorSession {
+                        await stale.shutdown()
+                        mediatorSession = nil
+                    }
+                    if let stale = tspSession {
+                        await stale.shutdown()
+                        tspSession = nil
+                    }
                     stepUpStatus = "Reconnecting to mediator…"
                     log("Mediator listen dropped: \(error.localizedDescription); reconnecting")
                     try? await Task.sleep(nanoseconds: backoff * 1_000_000_000)
@@ -703,14 +703,6 @@ final class AgentModel: ObservableObject {
         await startListening()
     }
 
-    private func normalizedURL() -> URL? {
-        let trimmed = vtaURL.trimmed
-        guard !trimmed.isEmpty, let url = URL(string: trimmed), url.scheme != nil else {
-            return nil
-        }
-        return url
-    }
-
     // MARK: Push wake-up (APNs)
 
     /// Ask for notification permission and register for remote notifications. The
@@ -731,9 +723,7 @@ final class AgentModel: ObservableObject {
     func onApnsToken(_ hex: String) async {
         apnsToken = hex
         print("[vta-agent] APNs device token: \(hex)")
-        guard let identity, let url = normalizedURL(), !trimmedDid.isEmpty,
-            let token = await currentAccessToken()
-        else {
+        guard let identity, let transport, !trimmedDid.isEmpty else {
             pushStatus = "Got APNs token — connect to a VTA first, then enable push."
             return
         }
@@ -750,10 +740,9 @@ final class AgentModel: ObservableObject {
                 environment: .sandbox,
                 gatewayURL: gatewayURL,
                 controllerVtaDid: trimmedDid,
-                vtaURL: url,
+                transport: transport,
                 vtaDid: trimmedDid,
                 identity: identity,
-                accessToken: token,
                 suggestedTriggers: mediator.isEmpty ? [] : [mediator])
             pushEnabled = setup.pushCapable
             persistConnection()
@@ -775,24 +764,30 @@ final class AgentModel: ObservableObject {
     /// A contentless wake arrived (background push). Re-establish what we need and
     /// drain any queued approve-requests, ratifying each with the holder key.
     func handlePushWake() async -> Bool {
-        guard let cfg = Self.loadConnection(), let vtaURLValue = URL(string: cfg.vtaURL) else {
+        guard let cfg = Self.loadConnection() else {
             pushStatus = "Push received, but no saved VTA connection — open the app and connect."
             return false
         }
+        // The mediator permits exactly ONE websocket per DID. If the supervised
+        // listener still holds it, that loop is already draining this inbox —
+        // opening a second socket here would be evicted as a duplicate channel,
+        // and the eviction could take out the live listener rather than us.
+        if listening, mediatorSession != nil || tspSession != nil {
+            log("Push wake ignored — the live inbox already holds this DID's socket.")
+            pushStatus = "Woken by push — the live inbox is already draining."
+            return false
+        }
+
         do {
             let id = try identity ?? HolderIdentity.loadOrCreate()
             identity = id
-            let accessToken: String
-            if let tokens {
-                accessToken = tokens.accessToken
-            } else {
-                let issued = try await VtaMobileAgent.authenticate(
-                    vtaURL: vtaURLValue, vtaDid: cfg.vtaDid, identity: id)
-                tokens = issued
-                accessToken = issued.accessToken
-            }
+            // A background wake is short-lived, so open a dedicated DIDComm
+            // session and both drain *and* answer over it. There is no token to
+            // fetch first — the holder key authorizes each message on its own,
+            // which removes the old wake path's slowest step.
             let session = try await id.connectMediator(
                 vtaDid: cfg.vtaDid, mediatorDid: cfg.mediatorDid)
+            let wakeTransport = DidcommTransport(session: session)
             defer { Task { await session.shutdown() } }
             var handledAny = false
             for _ in 0..<5 {
@@ -807,12 +802,9 @@ final class AgentModel: ObservableObject {
                 switch inbound {
                 case .stepUp(let doc):
                     await handleIncomingStepUp(
-                        doc: doc, url: vtaURLValue, did: cfg.vtaDid,
-                        token: accessToken, identity: id)
+                        doc: doc, transport: wakeTransport, did: cfg.vtaDid, identity: id)
                 case .taskConsent(let doc):
-                    await handleIncomingTaskConsent(
-                        doc: doc, url: vtaURLValue, did: cfg.vtaDid,
-                        token: accessToken, identity: id)
+                    await handleIncomingTaskConsent(doc: doc)
                 }
             }
             pushStatus = handledAny ? "✅ Push wake serviced." : "Woken by push — nothing pending."
@@ -838,7 +830,6 @@ final class AgentModel: ObservableObject {
     // MARK: Connection persistence
 
     struct ConnectionConfig {
-        let vtaURL: String
         let vtaDid: String
         let mediatorDid: String
         let gatewayUrl: String
@@ -846,7 +837,6 @@ final class AgentModel: ObservableObject {
 
     private func persistConnection() {
         let d = UserDefaults.standard
-        d.set(vtaURL.trimmed, forKey: "pnm.vtaURL")
         d.set(trimmedDid, forKey: "pnm.vtaDid")
         d.set(mediatorDid.trimmed, forKey: "pnm.mediatorDid")
         d.set(gatewayUrl.trimmed, forKey: "pnm.gatewayUrl")
@@ -858,19 +848,17 @@ final class AgentModel: ObservableObject {
 
     static func loadConnection() -> ConnectionConfig? {
         let d = UserDefaults.standard
-        guard let url = d.string(forKey: "pnm.vtaURL"), !url.isEmpty,
-            let did = d.string(forKey: "pnm.vtaDid"), !did.isEmpty,
+        guard let did = d.string(forKey: "pnm.vtaDid"), !did.isEmpty,
             let med = d.string(forKey: "pnm.mediatorDid"), !med.isEmpty
         else { return nil }
         return ConnectionConfig(
-            vtaURL: url, vtaDid: did, mediatorDid: med,
+            vtaDid: did, mediatorDid: med,
             gatewayUrl: d.string(forKey: "pnm.gatewayUrl") ?? "")
     }
 
     /// Prefill the connection fields from the last persisted session.
     func loadPersistedConnection() {
         let d = UserDefaults.standard
-        if vtaURL.isEmpty, let v = d.string(forKey: "pnm.vtaURL") { vtaURL = v }
         if vtaDid.isEmpty, let v = d.string(forKey: "pnm.vtaDid") { vtaDid = v }
         if mediatorDid.isEmpty, let v = d.string(forKey: "pnm.mediatorDid") { mediatorDid = v }
         if gatewayUrl.isEmpty, let v = d.string(forKey: "pnm.gatewayUrl") { gatewayUrl = v }

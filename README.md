@@ -1,7 +1,9 @@
 # vta-mobile-agent-ios
 
 The iOS VTA mobile agent — a login/authentication agent that provides biometric
-AAL1→AAL2 step-up. It consumes the **`vta-mobile-core`** engine (Rust + UniFFI,
+AAL1→AAL2 step-up. It talks to its VTA **only over the mediator** (DIDComm or
+TSP) — there is no REST client and no bearer token; see
+[Transport](#transport-no-vta-rest). It consumes the **`vta-mobile-core`** engine (Rust + UniFFI,
 built in [`OpenVTC/verifiable-trust-infrastructure`](https://github.com/OpenVTC/verifiable-trust-infrastructure))
 as a precompiled `VtaMobileCore.xcframework`, distributed via GitHub Releases
 and pinned by SwiftPM checksum.
@@ -12,6 +14,7 @@ and pinned by SwiftPM checksum.
 Package.swift                         SwiftPM manifest (pins the engine release)
 Sources/VtaMobileCore/                generated UniFFI Swift bindings (vendored)
 Sources/VtaMobileAgent/               agent façade over the engine
+Sources/VtaMobileAgent/VtaTransport.swift   DIDComm / TSP submission + TSP reply correlation
 Tests/VtaMobileAgentTests/            on-simulator smoke test
 App/                                  reference SwiftUI sources for the app target
 .github/workflows/ci.yml              runs the smoke test on an iOS Simulator
@@ -28,13 +31,56 @@ A plain `swift build` / `swift test` targets macOS and will fail to find a
 slice — that's expected. Always build/test against an **iOS Simulator**:
 
 ```sh
-xcodebuild test -scheme VtaMobileAgent-Package \
-  -destination 'platform=iOS Simulator,name=iPhone 16'
+xcodebuild test -workspace .swiftpm/xcode/package.xcworkspace \
+  -scheme VtaMobileAgent-Package \
+  -destination 'platform=iOS Simulator,name=iPhone 17'
 ```
 
 (Run `xcrun simctl list devices available | grep -i iphone` to pick an
-installed simulator.) Or open `Package.swift` in Xcode, choose an iPhone
+installed simulator. Note the `-workspace`: with the generated `.xcodeproj`
+present in the repo root, a bare `-scheme` resolves against *it* rather than
+`Package.swift`, and the package schemes won't be found.) Or open `Package.swift` in Xcode, choose an iPhone
 simulator, and press ⌘U.
+
+## Transport (no VTA REST)
+
+The agent reaches its VTA over the holder's mediator and nothing else. There is
+no `authenticate` step and no token to refresh: the VTA proves the sender
+cryptographically on every message — authcrypt for DIDComm, the sealed sender
+VID for TSP — and derives the caller's role, contexts and session from that DID
+alone (*intrinsic-sender auth*). **Possession of the holder key is the
+credential.**
+
+Everything the device submits (`auth/step-up/approve-response`,
+`task-consent/decision`, `device/set-wake`, `whoami`) goes through
+`VtaTransport.submit`, which reaches the same VTA dispatcher that used to sit
+behind `POST /api/trust-tasks`.
+
+|                   | DIDComm                            | TSP                                     |
+| ----------------- | ---------------------------------- | --------------------------------------- |
+| Framing           | Trust Task in the message `body`   | Trust Task bytes directly               |
+| Reply correlation | native, by `thid`                  | by `threadId`, via `TspReplyRouter`     |
+| `submit` waits?   | yes, in-place                      | yes, but the reply arrives on the inbox |
+
+TSP needs the router because it has no `thid` demux and `receiveNext` holds the
+socket lock for its whole budget — so a submit that read its own reply would
+deadlock the inbox loop. Instead the listen loop stays the sole reader and
+offers every frame to the router first. The correlation rule is the framework's:
+a response carries `threadId = request.threadId ?? request.id`.
+
+**What still isn't DIDComm.** Two things deliberately remain over HTTP:
+
+- **Enrolment.** The device `did:key` must be in the VTA's ACL
+  (`pnm acl create --did <did:key> …`) before *any* message from it is accepted.
+  An unenrolled device fails at the post-connect `whoami`.
+- **Push gateway registration.** `push/register` goes to the **gateway**, a
+  different service that is the only component permitted to see the raw APNs
+  token. Only the `device/set-wake` leg — the one addressed to the VTA — moved
+  onto the transport.
+
+`demoSelfStepUp` is gone: it provoked a `403` from an AAL2-gated endpoint, a
+challenge carried by an HTTP status, which the messaging transports have no
+equivalent for.
 
 ## Pinning / upgrading the engine
 
@@ -69,10 +115,23 @@ the engine repo (`vta-mobile-core/scripts/package-ios.sh`) and drop a
 file is present, `Package.swift` uses it instead of the published release:
 
 ```sh
-ln -s /abs/path/to/target/mobile/ios/VtaMobileCore.xcframework ./VtaMobileCore.xcframework
-xcodebuild test -scheme VtaMobileAgent-Package \
-  -destination 'platform=iOS Simulator,name=iPhone 16'
+cp -R /abs/path/to/target/mobile/ios/VtaMobileCore.xcframework ./VtaMobileCore.xcframework
+rm -rf .build ~/Library/Caches/org.swift.swiftpm/manifests   # see the two gotchas below
+xcodebuild test -workspace .swiftpm/xcode/package.xcworkspace \
+  -scheme VtaMobileAgent-Package \
+  -destination 'platform=iOS Simulator,name=iPhone 17'
 ```
+
+Two things that will otherwise cost you an hour:
+
+1. **Copy, don't symlink.** `Package.swift` selects the local xcframework with
+   `FileManager.fileExists`, and a symlink at that path does not reliably
+   satisfy it — SwiftPM silently falls back to downloading the pinned release,
+   and you debug "missing" FFI symbols that are right there in the header.
+2. **Clear the SwiftPM manifest cache.** Evaluated manifests are cached
+   *globally* in `~/Library/Caches/org.swift.swiftpm/manifests`, so the
+   local-vs-remote decision sticks across `rm -rf .build` and fresh
+   DerivedData.
 
 (Remember to also vendor that build's `VtaMobileCore.swift` into
 `Sources/VtaMobileCore/` so the wrapper matches the binary.)
@@ -99,19 +158,20 @@ The app is organised as a bottom **tab bar** so each context is focused:
 
 - **Home** — at-a-glance status hero + the single primary action. Once
   configured the agent runs itself; this screen just reflects that.
-- **Test** — manual surfaces for development: self step-up, *who am I*, live
-  mediator listening, pasted ratification, push-wake registration.
+- **Test** — manual surfaces for development: *who am I*, live mediator
+  listening, pasted ratification, push-wake registration.
 - **History** — a chronological, color-coded record of authentications,
   approvals (live / pasted / push), and errors.
 - **Logs** — the engine + app `stdout`/`stderr` stream captured in-app
   (`LogStore`), with copy/clear — diagnose on-device without Xcode attached.
-- **Settings** — all configuration (VTA DID/URL/mediator/gateway, auto-connect),
+- **Settings** — all configuration (VTA DID / mediator / gateway, auto-connect),
   the device identity, and the **theme picker**.
 
 **Everything is auto and recoverable.** Once a VTA is configured the agent
-auto-connects on launch, refreshes its token ahead of expiry, and supervises the
-mediator listener with exponential-backoff reconnects — a dropped network/VTA
-recovers with no user action. A connection **status pill** is always visible in
+auto-connects on launch and supervises the mediator listener with
+exponential-backoff reconnects — a dropped network/VTA recovers with no user
+action. There is no token refresh to schedule: *connected* simply means the
+inbox is open and the VTA answered a `whoami` over it. A connection **status pill** is always visible in
 the nav bar on every tab.
 
 **Themes** (`Theme.swift`) are user-selectable at runtime (Vibrant / Neon /

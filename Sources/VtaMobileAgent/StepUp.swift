@@ -25,18 +25,17 @@ extension VtaMobileAgent {
     /// carries it under `approveRequest`). Posts the holder-signed
     /// approve-response and returns the granted assurance level.
     ///
-    /// `accessToken` must be a token for *this holder's* session: the VTA binds
-    /// the approve-response's `issuer` to the authenticated caller
-    /// (`auth.did == issuer`), and this device always signs as its own holder.
-    /// The VTA then elevates the subject's session when this holder is the
-    /// subject (**self**) or the subject's authorized **delegated** approver.
+    /// The VTA binds the approve-response's `issuer` to the proven sender
+    /// (`auth.did == issuer`), and this device always signs as its own holder —
+    /// so `transport` must be this holder's own session. The VTA then elevates
+    /// the subject's session when this holder is the subject (**self**) or the
+    /// subject's authorized **delegated** approver.
     @discardableResult
     public static func approveStepUp(
         approveRequest: String,
-        vtaURL: URL,
+        transport: VtaTransport,
         vtaDid: String,
-        identity: HolderIdentity,
-        accessToken: String
+        identity: HolderIdentity
     ) async throws -> StepUpOutcome {
         let requestDoc = Self.unwrapApproveRequest(approveRequest)
         let request = try parseStepUpRequest(json: requestDoc)
@@ -59,9 +58,7 @@ extension VtaMobileAgent {
             grantedAcr: request.targetAcr ?? "aal2")
         let responseDoc = try buildApproveResponseDidSigned(draft: draft, signer: identity)
 
-        let client = VtaRestClient(baseURL: vtaURL)
-        let body = try await client.post(
-            path: "/api/trust-tasks", body: responseDoc, bearer: accessToken)
+        let body = try await transport.submit(responseDoc)
 
         // The success `#response` payload echoes the elevated session's acr.
         let acr = Self.jsonString(in: body, path: ["payload", "session", "acr"])
@@ -83,10 +80,9 @@ extension VtaMobileAgent {
     public static func denyStepUp(
         approveRequest: String,
         reason: String,
-        vtaURL: URL,
+        transport: VtaTransport,
         vtaDid: String,
-        identity: HolderIdentity,
-        accessToken: String
+        identity: HolderIdentity
     ) async throws -> DenyOutcome {
         let requestDoc = Self.unwrapApproveRequest(approveRequest)
         let request = try parseStepUpRequest(json: requestDoc)
@@ -103,8 +99,7 @@ extension VtaMobileAgent {
         let responseDoc = try buildApproveResponseDenied(
             draft: draft, reason: reason, signer: identity)
 
-        let client = VtaRestClient(baseURL: vtaURL)
-        _ = try await client.post(path: "/api/trust-tasks", body: responseDoc, bearer: accessToken)
+        _ = try await transport.submit(responseDoc)
         return DenyOutcome(sessionId: request.sessionId, reason: reason)
     }
 
@@ -117,33 +112,13 @@ extension VtaMobileAgent {
         review.authorizationContext != nil
     }
 
-    /// Self-contained demo: provoke a step-up on *this device's own* session by
-    /// poking an AAL2-gated endpoint with the AAL1 token, then approve it.
-    /// Returns the granted acr (expected `"aal2"`). Handy to exercise the whole
-    /// loop without a second device.
-    ///
-    /// The `RequireStepUp` extractor fires before the route handler, so the
-    /// probe `POST /acl` never creates anything — it just yields the `403`
-    /// carrying the approve-request for our session.
-    @discardableResult
-    public static func demoSelfStepUp(
-        vtaURL: URL,
-        vtaDid: String,
-        identity: HolderIdentity,
-        accessToken: String
-    ) async throws -> StepUpOutcome {
-        let client = VtaRestClient(baseURL: vtaURL)
-        let (status, body) = try await client.postRaw(
-            path: "/acl", body: "{}", bearer: accessToken)
-        guard status == 403, Self.unwrapApproveRequest(body) != body || body.contains("approveRequest")
-        else {
-            throw AgentError.badResponse(
-                "expected a 403 step-up challenge from the gated endpoint, got HTTP \(status): \(body)")
-        }
-        return try await approveStepUp(
-            approveRequest: body, vtaURL: vtaURL, vtaDid: vtaDid,
-            identity: identity, accessToken: accessToken)
-    }
+    // `demoSelfStepUp` is gone with REST. It worked by poking an AAL2-gated
+    // endpoint (`POST /acl`) with an AAL1 token so the `RequireStepUp` extractor
+    // would answer `403` with an approve-request for our own session — a
+    // challenge carried by an *HTTP status*, which the messaging transports have
+    // no equivalent for. Exercise the loop end-to-end instead by triggering a
+    // delegated step-up at the VTA and letting it push the request to this
+    // device, which is the path a real sign-in takes anyway.
 
     /// If `input` is a VTA `403` body `{ "approveRequest": {…} }`, return the
     /// embedded document; otherwise return `input` unchanged (already a bare

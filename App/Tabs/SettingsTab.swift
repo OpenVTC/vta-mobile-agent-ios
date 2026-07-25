@@ -46,15 +46,12 @@ struct SettingsTab: View {
             .font(.subheadline.weight(.semibold))
             .disabled(model.busy)
 
-            ThemedField(title: "VTA URL", prompt: "http://192.168.1.10:8100",
-                text: $model.vtaURL, keyboard: .URL, mono: true)
-            ThemedField(title: "Mediator DID (optional, for live approvals)",
-                prompt: "did:web:… / did:webvh:…", text: $model.mediatorDid, mono: true)
+            ThemedField(title: "Mediator DID", prompt: "did:web:… / did:webvh:…",
+                text: $model.mediatorDid, mono: true)
             ThemedField(title: "Push gateway URL (optional)", prompt: "https://gw.example",
                 text: $model.gatewayUrl, keyboard: .URL, mono: true)
         }
         .onChange(of: model.vtaDid) { _ in model.saveConfig() }
-        .onChange(of: model.vtaURL) { _ in model.saveConfig() }
         .onChange(of: model.mediatorDid) { _ in model.saveConfig() }
         .onChange(of: model.gatewayUrl) { _ in model.saveConfig() }
         .sheet(isPresented: $showScanner) {
