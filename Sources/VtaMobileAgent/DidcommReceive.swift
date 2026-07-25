@@ -72,11 +72,24 @@ extension VtaMobileAgent {
     /// The TSP session (ATM) has already proven the sender VID and decrypted
     /// under the holder key, so the document is authenticated plaintext here,
     /// exactly as with DIDComm authcrypt.
+    ///
+    /// **Pass the `router` whenever the app also *submits* over TSP.** This loop
+    /// is the only reader of the TSP socket, so it is also the only thing that
+    /// can see the VTA's replies to our own submissions. Offering each document
+    /// to the router first is what lets a `TspTransport.submit` complete;
+    /// without it, replies would fall through the classifiers below and be
+    /// dropped as "other traffic", and every submit would time out.
     public static func nextInboundTsp(
         session: TspMediatorSession,
+        router: TspReplyRouter? = nil,
         timeoutSecs: UInt64 = 30
     ) async throws -> InboundRequest? {
         guard let doc = try await session.receiveNext(timeoutSecs: timeoutSecs) else {
+            return nil
+        }
+        // A correlated reply belongs to whoever is awaiting it, not to the
+        // approval surfaces below.
+        if let router, await router.deliver(doc) {
             return nil
         }
         if isStepUpApproveRequest(doc) {
@@ -98,18 +111,17 @@ extension VtaMobileAgent {
     @discardableResult
     public static func receiveStepUpOnce(
         session: MediatorSession,
-        vtaURL: URL,
+        transport: VtaTransport,
         vtaDid: String,
         identity: HolderIdentity,
-        accessToken: String,
         timeoutSecs: UInt64 = 30
     ) async throws -> StepUpOutcome? {
         guard let messageJson = try await session.receiveNext(timeoutSecs: timeoutSecs) else {
             return nil  // nothing within the timeout
         }
         return try await approveIfStepUpRequest(
-            messageJson: messageJson, vtaURL: vtaURL, vtaDid: vtaDid,
-            identity: identity, accessToken: accessToken)
+            messageJson: messageJson, transport: transport, vtaDid: vtaDid,
+            identity: identity)
     }
 
     /// Pull the next inbound message and return its step-up approve-request
@@ -144,10 +156,9 @@ extension VtaMobileAgent {
     public static func receiveStepUpApproveRequest(
         packed: String,
         vtaPeer: Peer,
-        vtaURL: URL,
+        transport: VtaTransport,
         vtaDid: String,
-        identity: HolderIdentity,
-        accessToken: String
+        identity: HolderIdentity
     ) async throws -> StepUpOutcome? {
         let session = try DidcommSession(holder: identity.didcommHolderKeys())
         try session.addPeer(peer: vtaPeer)
@@ -158,8 +169,8 @@ extension VtaMobileAgent {
                 "inbound DIDComm message was not sender-authenticated; refusing to act on it")
         }
         return try await approveIfStepUpRequest(
-            messageJson: unpacked.messageJson, vtaURL: vtaURL, vtaDid: vtaDid,
-            identity: identity, accessToken: accessToken)
+            messageJson: unpacked.messageJson, transport: transport, vtaDid: vtaDid,
+            identity: identity)
     }
 
     /// Core: given an **unpacked** DIDComm message `{ id, type, body, … }`,
@@ -167,10 +178,9 @@ extension VtaMobileAgent {
     /// in the DIDComm `body` (the convention the VTA's outbound send follows).
     static func approveIfStepUpRequest(
         messageJson: String,
-        vtaURL: URL,
+        transport: VtaTransport,
         vtaDid: String,
-        identity: HolderIdentity,
-        accessToken: String
+        identity: HolderIdentity
     ) async throws -> StepUpOutcome? {
         guard let approveRequest = didcommBody(messageJson),
             isStepUpApproveRequest(approveRequest)
@@ -178,8 +188,8 @@ extension VtaMobileAgent {
             return nil
         }
         return try await approveStepUp(
-            approveRequest: approveRequest, vtaURL: vtaURL, vtaDid: vtaDid,
-            identity: identity, accessToken: accessToken)
+            approveRequest: approveRequest, transport: transport, vtaDid: vtaDid,
+            identity: identity)
     }
 
     /// Re-serialize the `body` object of a DIDComm message as a JSON string, or

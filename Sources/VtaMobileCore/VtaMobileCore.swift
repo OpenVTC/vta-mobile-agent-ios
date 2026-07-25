@@ -748,6 +748,37 @@ public protocol MediatorSessionProtocol: AnyObject {
     func receiveNext(timeoutSecs: UInt64) async throws -> String?
 
     /**
+     * Submit a Trust Task document to the VTA over this mediator session and
+     * wait up to `timeout_secs` for its `#response`. Returns the framework
+     * response document as JSON — the same bytes `POST /api/trust-tasks`
+     * returns over REST, so callers parse it identically.
+     *
+     * `doc_json` is a complete, already-signed Trust Task document (e.g. what
+     * `build_approve_response_did_signed` produces). It rides as the body of a
+     * [`TRUST_TASK_ENVELOPE_TYPE`] DIDComm message; the VTA's
+     * `messaging::handlers::handle_trust_task` unwraps it into the same
+     * `dispatch_trust_task_core` the REST route calls.
+     *
+     * **No bearer token.** The message is authcrypt-packed, so the VTA proves
+     * the sender DID cryptographically and derives authorization from it
+     * (intrinsic-sender auth) — this is what lets a device operate with no VTA
+     * REST API at all.
+     *
+     * Safe to call while a [`receive_next`](Self::receive_next) loop is
+     * running: the reply is demuxed to this caller by `thid`, so it can't be
+     * stolen by (or steal from) the unsolicited inbound stream.
+     */
+    func sendTrustTask(docJson: String, timeoutSecs: UInt64) async throws -> String
+
+    /**
+     * Send a Trust Task document without awaiting a response — the
+     * fire-and-forget counterpart to
+     * [`send_trust_task`](Self::send_trust_task), for documents whose outcome
+     * the caller doesn't need (or will pick up off the inbox itself).
+     */
+    func sendTrustTaskOneWay(docJson: String) async throws
+
+    /**
      * Gracefully close the mediator connection (live-delivery WebSocket).
      */
     func shutdown() async
@@ -854,6 +885,67 @@ open class MediatorSession:
     }
 
     /**
+     * Submit a Trust Task document to the VTA over this mediator session and
+     * wait up to `timeout_secs` for its `#response`. Returns the framework
+     * response document as JSON — the same bytes `POST /api/trust-tasks`
+     * returns over REST, so callers parse it identically.
+     *
+     * `doc_json` is a complete, already-signed Trust Task document (e.g. what
+     * `build_approve_response_did_signed` produces). It rides as the body of a
+     * [`TRUST_TASK_ENVELOPE_TYPE`] DIDComm message; the VTA's
+     * `messaging::handlers::handle_trust_task` unwraps it into the same
+     * `dispatch_trust_task_core` the REST route calls.
+     *
+     * **No bearer token.** The message is authcrypt-packed, so the VTA proves
+     * the sender DID cryptographically and derives authorization from it
+     * (intrinsic-sender auth) — this is what lets a device operate with no VTA
+     * REST API at all.
+     *
+     * Safe to call while a [`receive_next`](Self::receive_next) loop is
+     * running: the reply is demuxed to this caller by `thid`, so it can't be
+     * stolen by (or steal from) the unsolicited inbound stream.
+     */
+    open func sendTrustTask(docJson: String, timeoutSecs: UInt64) async throws -> String {
+        return
+            try await uniffiRustCallAsync(
+                rustFutureFunc: {
+                    uniffi_vta_mobile_core_fn_method_mediatorsession_send_trust_task(
+                        self.uniffiClonePointer(),
+                        FfiConverterString.lower(docJson), FfiConverterUInt64.lower(timeoutSecs)
+                    )
+                },
+                pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
+                completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
+                freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
+                liftFunc: FfiConverterString.lift,
+                errorHandler: FfiConverterTypeFfiError.lift
+            )
+    }
+
+    /**
+     * Send a Trust Task document without awaiting a response — the
+     * fire-and-forget counterpart to
+     * [`send_trust_task`](Self::send_trust_task), for documents whose outcome
+     * the caller doesn't need (or will pick up off the inbox itself).
+     */
+    open func sendTrustTaskOneWay(docJson: String) async throws {
+        return
+            try await uniffiRustCallAsync(
+                rustFutureFunc: {
+                    uniffi_vta_mobile_core_fn_method_mediatorsession_send_trust_task_one_way(
+                        self.uniffiClonePointer(),
+                        FfiConverterString.lower(docJson)
+                    )
+                },
+                pollFunc: ffi_vta_mobile_core_rust_future_poll_void,
+                completeFunc: ffi_vta_mobile_core_rust_future_complete_void,
+                freeFunc: ffi_vta_mobile_core_rust_future_free_void,
+                liftFunc: { $0 },
+                errorHandler: FfiConverterTypeFfiError.lift
+            )
+    }
+
+    /**
      * Gracefully close the mediator connection (live-delivery WebSocket).
      */
     open func shutdown() async {
@@ -943,6 +1035,30 @@ public protocol TspMediatorSessionProtocol: AnyObject {
      * `None` if nothing arrived within the timeout. Call again to keep polling.
      */
     func receiveNext(timeoutSecs: UInt64) async throws -> String?
+
+    /**
+     * Submit an already-signed Trust Task document to `vta_did`, routed through
+     * `mediator_did`. TSP carries the document bytes directly — no DIDComm
+     * envelope — so the VTA's `tsp_inbound::dispatch_one` hands the payload
+     * straight to the same `dispatch_trust_task_core` that backs
+     * `POST /api/trust-tasks`.
+     *
+     * **No bearer token.** TSP proves the sender, and the VTA derives
+     * authorization from that sealed `sender_vid` (intrinsic-sender auth).
+     *
+     * **Fire-and-forget, unlike the DIDComm
+     * [`send_trust_task`](crate::mediator::MediatorSession::send_trust_task).**
+     * The VTA seals its reply and routes it back over TSP, so the response
+     * document arrives on [`receive_next`](Self::receive_next) like any other
+     * frame — a caller that needs the outcome must match it off the inbox (on
+     * the document's `id`/`type`) rather than awaiting it here. TSP has no
+     * `thid` demux, and `receive_next` holds the socket lock for its whole
+     * budget, so an in-place wait would deadlock against a running inbox loop.
+     *
+     * Sending itself takes no socket lock, so this *is* safe to call while
+     * that loop is blocked in `receive_next`.
+     */
+    func sendTrustTask(vtaDid: String, mediatorDid: String, docJson: String) async throws
 
     /**
      * Gracefully close the mediator connection (the TSP websocket).
@@ -1077,6 +1193,45 @@ open class TspMediatorSession:
                 completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
                 freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
                 liftFunc: FfiConverterOptionString.lift,
+                errorHandler: FfiConverterTypeFfiError.lift
+            )
+    }
+
+    /**
+     * Submit an already-signed Trust Task document to `vta_did`, routed through
+     * `mediator_did`. TSP carries the document bytes directly — no DIDComm
+     * envelope — so the VTA's `tsp_inbound::dispatch_one` hands the payload
+     * straight to the same `dispatch_trust_task_core` that backs
+     * `POST /api/trust-tasks`.
+     *
+     * **No bearer token.** TSP proves the sender, and the VTA derives
+     * authorization from that sealed `sender_vid` (intrinsic-sender auth).
+     *
+     * **Fire-and-forget, unlike the DIDComm
+     * [`send_trust_task`](crate::mediator::MediatorSession::send_trust_task).**
+     * The VTA seals its reply and routes it back over TSP, so the response
+     * document arrives on [`receive_next`](Self::receive_next) like any other
+     * frame — a caller that needs the outcome must match it off the inbox (on
+     * the document's `id`/`type`) rather than awaiting it here. TSP has no
+     * `thid` demux, and `receive_next` holds the socket lock for its whole
+     * budget, so an in-place wait would deadlock against a running inbox loop.
+     *
+     * Sending itself takes no socket lock, so this *is* safe to call while
+     * that loop is blocked in `receive_next`.
+     */
+    open func sendTrustTask(vtaDid: String, mediatorDid: String, docJson: String) async throws {
+        return
+            try await uniffiRustCallAsync(
+                rustFutureFunc: {
+                    uniffi_vta_mobile_core_fn_method_tspmediatorsession_send_trust_task(
+                        self.uniffiClonePointer(),
+                        FfiConverterString.lower(vtaDid), FfiConverterString.lower(mediatorDid), FfiConverterString.lower(docJson)
+                    )
+                },
+                pollFunc: ffi_vta_mobile_core_rust_future_poll_void,
+                completeFunc: ffi_vta_mobile_core_rust_future_complete_void,
+                freeFunc: ffi_vta_mobile_core_rust_future_free_void,
+                liftFunc: { $0 },
                 errorHandler: FfiConverterTypeFfiError.lift
             )
     }
@@ -3012,7 +3167,8 @@ public func FfiConverterTypeUnpackedMessage_lower(_ value: UnpackedMessage) -> R
  */
 public struct VtaEndpoints {
     /**
-     * REST base URL, from the `#vta-rest` (`VTARest`) service. `None` if the
+     * REST base URL, from a REST service entry (`VTARest` for a VTA,
+     * `TRQPRest` for a Trust Registry), matched by `type`. `None` if the
      * VTA advertises no REST service.
      */
     public var restBaseUrl: String?
@@ -3026,7 +3182,8 @@ public struct VtaEndpoints {
     /// declare one manually.
     public init(
         /* 
-         * REST base URL, from the `#vta-rest` (`VTARest`) service. `None` if the
+         * REST base URL, from a REST service entry (`VTARest` for a VTA,
+         * `TRQPRest` for a Trust Registry), matched by `type`. `None` if the
          * VTA advertises no REST service.
          */ restBaseUrl: String?,
         /* 
@@ -4483,6 +4640,12 @@ private var initializationResult: InitializationResult = {
     if uniffi_vta_mobile_core_checksum_method_mediatorsession_receive_next() != 7212 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_vta_mobile_core_checksum_method_mediatorsession_send_trust_task() != 2189 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_vta_mobile_core_checksum_method_mediatorsession_send_trust_task_one_way() != 45781 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_vta_mobile_core_checksum_method_mediatorsession_shutdown() != 60334 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4490,6 +4653,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_method_tspmediatorsession_receive_next() != 32079 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_vta_mobile_core_checksum_method_tspmediatorsession_send_trust_task() != 60157 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_method_tspmediatorsession_shutdown() != 4555 {

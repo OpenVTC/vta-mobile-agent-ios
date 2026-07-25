@@ -26,7 +26,6 @@ struct TestTab: View {
                 }
             } else {
                 sessionCard
-                stepUpCard
                 listenCard
                 pasteCard
                 pushCard
@@ -56,20 +55,6 @@ struct TestTab: View {
                     .foregroundStyle(.secondary)
                     .padding(.top, 4)
             }
-        }
-    }
-
-    private var stepUpCard: some View {
-        Card(tint: .pink) {
-            CardHeader(title: "Self step-up (demo)", systemImage: "arrow.up.circle.fill", tint: .pink)
-            Text("Provoke + approve an AAL2 step-up on this device's own session.")
-                .font(.caption).foregroundStyle(.secondary)
-            Button {
-                Task { await model.demoStepUp() }
-            } label: {
-                Label("Step up this session", systemImage: "lock.open.fill")
-            }
-            .disabled(model.busy).padding(.top, 4)
         }
     }
 

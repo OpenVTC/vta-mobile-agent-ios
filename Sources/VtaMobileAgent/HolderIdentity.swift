@@ -5,6 +5,9 @@ import VtaMobileCore
 /// Errors surfaced by the agent layer (key custody, transport, engine).
 public enum AgentError: Error, LocalizedError {
     case keychain(OSStatus)
+    /// A non-2xx from the **push gateway** — the only service still addressed by
+    /// URL. The VTA is reached over ``VtaTransport``, which fails as
+    /// ``badResponse`` rather than with a status code.
     case http(status: Int, body: String)
     case badResponse(String)
 
