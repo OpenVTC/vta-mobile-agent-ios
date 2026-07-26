@@ -180,7 +180,8 @@ final class AgentModel: ObservableObject {
         if let m = p.mediatorDID { mediatorDid = m }
         if let g = p.gatewayURL { gatewayUrl = g }
         persistConnection()
-        recordEvent(.info, "Paired via QR", p.tenant.map { "tenant · \($0)" } ?? p.vtaDID)
+        recordEvent(
+            .info, "Paired via QR", p.tenant.map { "tenant · \($0)" }, did: p.vtaDID)
         status = "Paired — connecting…"
         Task { await connect() }
     }
@@ -227,7 +228,9 @@ final class AgentModel: ObservableObject {
             let roles = info.roles.isEmpty ? "—" : info.roles.joined(separator: ", ")
             whoamiSummary = "session \(info.sessionId)\nacr \(info.acr ?? "—") · roles: \(roles)"
             status = "✅ Connected over \(useTsp ? "TSP" : "DIDComm") — acr \(info.acr ?? "—")"
-            recordEvent(.auth, "Connected", "acr \(info.acr ?? "—") · roles: \(roles)")
+            recordEvent(
+                .auth, "Connected", "acr \(info.acr ?? "—") · roles: \(roles)",
+                did: trimmedDid)
             if pushEnabled { UIApplication.shared.registerForRemoteNotifications() }
         } catch {
             isAuthenticated = false
@@ -408,13 +411,17 @@ final class AgentModel: ObservableObject {
                     approveRequest: pending.rawDoc, transport: transport, vtaDid: trimmedDid,
                     identity: identity)
                 stepUpStatus = "✅ Approved — \(pending.summary)"
-                recordEvent(.approval, "Approved", pending.summary)
+                recordEvent(
+                    .approval, "Approved", pending.summary,
+                    did: pending.review.relyingParty)
             } else {
                 _ = try await VtaMobileAgent.denyStepUp(
                     approveRequest: pending.rawDoc, reason: reason, transport: transport,
                     vtaDid: trimmedDid, identity: identity)
                 stepUpStatus = "🚫 Declined — \(pending.summary)"
-                recordEvent(.error, "Declined", pending.summary)
+                recordEvent(
+                    .error, "Declined", pending.summary,
+                    did: pending.review.relyingParty)
             }
             pendingApprovals.removeAll { $0.review.sessionId == pending.review.sessionId }
             // Clear the (possibly still-visible) notification for this ask.
@@ -504,13 +511,17 @@ final class AgentModel: ObservableObject {
                     request: pending.rawDoc, transport: transport, vtaDid: trimmedDid,
                     identity: identity)
                 stepUpStatus = "✅ Approved — \(pending.summary) (\(outcome.status))"
-                recordEvent(.approval, "Approved task", pending.summary)
+                recordEvent(
+                    .approval, "Approved task", pending.summary,
+                    did: pending.request.issuer)
             } else {
                 _ = try await VtaMobileAgent.denyTaskConsent(
                     request: pending.rawDoc, reason: reason, transport: transport,
                     vtaDid: trimmedDid, identity: identity)
                 stepUpStatus = "🚫 Declined — \(pending.summary)"
-                recordEvent(.error, "Declined task", pending.summary)
+                recordEvent(
+                    .error, "Declined task", pending.summary,
+                    did: pending.request.issuer)
             }
             pendingConsents.removeAll { $0.request.payloadDigest == pending.request.payloadDigest }
             UNUserNotificationCenter.current().removeDeliveredNotifications(
@@ -817,10 +828,15 @@ final class AgentModel: ObservableObject {
 
     // MARK: History + logging
 
-    private func recordEvent(_ kind: AgentEvent.Kind, _ title: String, _ detail: String?) {
-        events.insert(AgentEvent(kind: kind, title: title, detail: detail), at: 0)
+    /// `did` is the identity the entry concerns, when there is one. The log line
+    /// keeps the full DID — a log is grepped, not read, so abbreviating there
+    /// would lose the thing you grep for.
+    private func recordEvent(
+        _ kind: AgentEvent.Kind, _ title: String, _ detail: String?, did: String? = nil
+    ) {
+        events.insert(AgentEvent(kind: kind, title: title, detail: detail, did: did), at: 0)
         if events.count > 200 { events.removeLast(events.count - 200) }
-        log("[\(kind)] \(title)\(detail.map { " — \($0)" } ?? "")")
+        log("[\(kind)] \(title)\(detail.map { " — \($0)" } ?? "")\(did.map { " · \($0)" } ?? "")")
     }
 
     func log(_ message: String) {
@@ -912,4 +928,10 @@ struct AgentEvent: Identifiable {
     let kind: Kind
     let title: String
     let detail: String?
+    /// The DID this entry is *about* — the relying party that asked, the VTA that
+    /// delivered — carried as a field rather than interpolated into `detail` so the
+    /// row can render it through `DidLabel` and pick up its agent name. History
+    /// exists to be audited after the fact, and "who asked" is the part worth
+    /// naming.
+    let did: String?
 }

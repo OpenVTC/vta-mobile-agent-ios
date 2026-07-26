@@ -33,11 +33,12 @@ struct SettingsTab: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            Text("Or enter the VTA's DID and tap Resolve to fill the URL and mediator.")
+            Text("Or enter the VTA's DID and tap Resolve to fill the mediator.")
                 .font(.caption).foregroundStyle(.secondary)
 
             ThemedField(title: "VTA DID", prompt: "did:webvh:… / did:web:…",
                 text: $model.vtaDid, mono: true)
+            DidNameNote(did: model.vtaDid)
             Button {
                 Task { await model.resolveFromDid() }
             } label: {
@@ -48,6 +49,7 @@ struct SettingsTab: View {
 
             ThemedField(title: "Mediator DID", prompt: "did:web:… / did:webvh:…",
                 text: $model.mediatorDid, mono: true)
+            DidNameNote(did: model.mediatorDid)
             ThemedField(title: "Push gateway URL (optional)", prompt: "https://gw.example",
                 text: $model.gatewayUrl, keyboard: .URL, mono: true)
         }
