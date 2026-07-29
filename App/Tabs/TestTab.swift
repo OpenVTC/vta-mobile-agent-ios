@@ -104,10 +104,26 @@ struct TestTab: View {
     /// Decode the structured authorization context from the currently-pasted
     /// approve-request, if it carries one (nil for a plain login step-up or
     /// while the text isn't yet a valid document).
+    ///
+    /// Preview-only, decoded locally: the engine's `inspect` now *verifies* the
+    /// request's proof (async, may resolve the issuer's DID), which is the wrong
+    /// shape for a keystroke-live preview. Verification still gates the actual
+    /// approval — `approvePasted` goes through the verifying parse.
     private var pastedAuthorizationContext: AuthorizationContext? {
         let text = model.pastedApproveRequest.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return nil }
-        return (try? VtaMobileAgent.inspect(approveRequest: text))?.authorizationContext
+        guard !text.isEmpty,
+            let data = text.data(using: .utf8),
+            var obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        // A VTA `403` body carries the document under `approveRequest`.
+        if let inner = obj["approveRequest"] as? [String: Any] { obj = inner }
+        guard let payload = obj["payload"] as? [String: Any],
+            let ext = payload["ext"] as? [String: Any],
+            let ctx = ext["org.openvtc.authorization-context"],
+            let ctxData = try? JSONSerialization.data(withJSONObject: ctx),
+            let ctxJson = String(data: ctxData, encoding: .utf8)
+        else { return nil }
+        return AuthorizationContext.decode(fromJSON: ctxJson)
     }
 
     private var pushCard: some View {

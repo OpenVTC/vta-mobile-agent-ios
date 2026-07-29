@@ -13,9 +13,13 @@ import VtaMobileCore
 /// - `receiveStepUpApproveRequest(packed:…)` — unpacks a raw packed message
 ///   itself (for transports that hand over ciphertext directly).
 extension VtaMobileAgent {
-    /// Trust Task `type` of a step-up approve-request.
-    static let stepUpApproveRequestType =
-        "https://trusttasks.org/spec/auth/step-up/approve-request/0.1"
+    /// Trust Task `type`s of a step-up approve-request. The engine parses (and
+    /// verifies) both; 0.2's `didSigned` evidence spelling is normalised to
+    /// `did-signed` by the core so the rest of the app is version-independent.
+    static let stepUpApproveRequestTypes = [
+        "https://trusttasks.org/spec/auth/step-up/approve-request/0.1",
+        "https://trusttasks.org/spec/auth/step-up/approve-request/0.2",
+    ]
 
     /// Trust Task `type` of a task-consent request (the delegated-execution
     /// approval this device answers as a second approving device).
@@ -114,6 +118,7 @@ extension VtaMobileAgent {
         transport: VtaTransport,
         vtaDid: String,
         identity: HolderIdentity,
+        trustedIssuers: [String],
         timeoutSecs: UInt64 = 30
     ) async throws -> StepUpOutcome? {
         guard let messageJson = try await session.receiveNext(timeoutSecs: timeoutSecs) else {
@@ -121,7 +126,7 @@ extension VtaMobileAgent {
         }
         return try await approveIfStepUpRequest(
             messageJson: messageJson, transport: transport, vtaDid: vtaDid,
-            identity: identity)
+            identity: identity, trustedIssuers: trustedIssuers)
     }
 
     /// Pull the next inbound message and return its step-up approve-request
@@ -158,7 +163,8 @@ extension VtaMobileAgent {
         vtaPeer: Peer,
         transport: VtaTransport,
         vtaDid: String,
-        identity: HolderIdentity
+        identity: HolderIdentity,
+        trustedIssuers: [String]
     ) async throws -> StepUpOutcome? {
         let session = try DidcommSession(holder: identity.didcommHolderKeys())
         try session.addPeer(peer: vtaPeer)
@@ -170,7 +176,7 @@ extension VtaMobileAgent {
         }
         return try await approveIfStepUpRequest(
             messageJson: unpacked.messageJson, transport: transport, vtaDid: vtaDid,
-            identity: identity)
+            identity: identity, trustedIssuers: trustedIssuers)
     }
 
     /// Core: given an **unpacked** DIDComm message `{ id, type, body, … }`,
@@ -180,7 +186,8 @@ extension VtaMobileAgent {
         messageJson: String,
         transport: VtaTransport,
         vtaDid: String,
-        identity: HolderIdentity
+        identity: HolderIdentity,
+        trustedIssuers: [String]
     ) async throws -> StepUpOutcome? {
         guard let approveRequest = didcommBody(messageJson),
             isStepUpApproveRequest(approveRequest)
@@ -189,7 +196,7 @@ extension VtaMobileAgent {
         }
         return try await approveStepUp(
             approveRequest: approveRequest, transport: transport, vtaDid: vtaDid,
-            identity: identity)
+            identity: identity, trustedIssuers: trustedIssuers)
     }
 
     /// Re-serialize the `body` object of a DIDComm message as a JSON string, or
@@ -204,9 +211,10 @@ extension VtaMobileAgent {
         return bodyString
     }
 
-    /// True when `doc` is an `auth/step-up/approve-request/0.1` document.
+    /// True when `doc` is an `auth/step-up/approve-request/0.1` or `/0.2`
+    /// document.
     static func isStepUpApproveRequest(_ doc: String) -> Bool {
-        docType(doc) == stepUpApproveRequestType
+        docType(doc).map(stepUpApproveRequestTypes.contains) ?? false
     }
 
     /// True when `doc` is a `task-consent/request/0.1` document.

@@ -125,18 +125,26 @@ extension VtaMobileAgent {
         public let sessionId: String
         public let targetAcr: String?
         public let authorizationContext: AuthorizationContext?
-        /// The relying party that issued the request (the approve-request
-        /// `issuer` — the VTA, or the domain on whose behalf it asks), shown so
-        /// the operator knows *who* is asking. `nil` if the request omitted it.
-        public let relyingParty: String?
+        /// The relying party that issued the request — the **proven** signer of
+        /// the request's Data Integrity proof (the engine refuses to return a
+        /// request whose proof doesn't verify), shown so the operator knows
+        /// *who* is asking.
+        public let relyingParty: String
     }
 
     /// Inspect an incoming approve-request (a bare document or a VTA `403` body)
     /// for display *before* approving — parses via the engine and decodes any
     /// structured authorization context.
-    public static func inspect(approveRequest: String) throws -> StepUpReview {
+    ///
+    /// The engine verifies the request's `eddsa-jcs-2022` proof and that the
+    /// proven signer is in `trustedIssuers` *before* returning anything. Throws
+    /// `FfiError.UntrustedIssuer` for an unverifiable request — the caller MUST
+    /// log and drop it without prompting the operator.
+    public static func inspect(
+        approveRequest: String, trustedIssuers: [String]
+    ) async throws -> StepUpReview {
         let doc = unwrapApproveRequest(approveRequest)
-        let r = try parseStepUpRequest(json: doc)
+        let r = try await parseStepUpRequest(json: doc, trustedIssuers: trustedIssuers)
         let ctx = r.authorizationContext.flatMap { AuthorizationContext.decode(fromJSON: $0) }
         return StepUpReview(
             reason: r.reason,
