@@ -35,10 +35,12 @@ extension VtaMobileAgent {
         approveRequest: String,
         transport: VtaTransport,
         vtaDid: String,
-        identity: HolderIdentity
+        identity: HolderIdentity,
+        trustedIssuers: [String]
     ) async throws -> StepUpOutcome {
         let requestDoc = Self.unwrapApproveRequest(approveRequest)
-        let request = try parseStepUpRequest(json: requestDoc)
+        let request = try await parseStepUpRequest(
+            json: requestDoc, trustedIssuers: trustedIssuers)
 
         // Sign as ourselves — the holder key never leaves the device. When the
         // request's subject is us this is a *self* step-up (issuer == subject);
@@ -82,10 +84,12 @@ extension VtaMobileAgent {
         reason: String,
         transport: VtaTransport,
         vtaDid: String,
-        identity: HolderIdentity
+        identity: HolderIdentity,
+        trustedIssuers: [String]
     ) async throws -> DenyOutcome {
         let requestDoc = Self.unwrapApproveRequest(approveRequest)
-        let request = try parseStepUpRequest(json: requestDoc)
+        let request = try await parseStepUpRequest(
+            json: requestDoc, trustedIssuers: trustedIssuers)
 
         let draft = ApproveResponseDraft(
             id: "urn:uuid:\(UUID().uuidString)",

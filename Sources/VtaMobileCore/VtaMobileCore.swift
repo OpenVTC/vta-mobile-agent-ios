@@ -2444,9 +2444,11 @@ public func FfiConverterTypeSetWakeOutcome_lower(_ value: SetWakeOutcome) -> Rus
  */
 public struct StepUpRequest {
     /**
-     * The relying party that issued the request (document `issuer`), if present.
+     * The relying party that issued the request — the **proven** signer of the
+     * document's Data Integrity proof, guaranteed to be in the caller's
+     * enrolled-executor allowlist.
      */
-    public var relyingParty: String?
+    public var relyingParty: String
     /**
      * The VID whose session is being elevated.
      */
@@ -2468,8 +2470,11 @@ public struct StepUpRequest {
      */
     public var targetAcr: String?
     /**
-     * Evidence gates the relying party will accept (`"did-signed"` / `"webauthn"`).
-     * Empty when the request did not constrain it (any supported kind is allowed).
+     * Evidence gates the relying party will accept (`"did-signed"` /
+     * `"webauthn"`). Empty when the request did not constrain it (any
+     * supported kind is allowed). The `0.2` wire spelling `didSigned` is
+     * normalised to `did-signed`, so the native layer switches on one set of
+     * strings regardless of the request version.
      */
     public var acceptableEvidence: [String]
     /**
@@ -2490,8 +2495,10 @@ public struct StepUpRequest {
     /// declare one manually.
     public init(
         /* 
-         * The relying party that issued the request (document `issuer`), if present.
-         */ relyingParty: String?,
+         * The relying party that issued the request — the **proven** signer of the
+         * document's Data Integrity proof, guaranteed to be in the caller's
+         * enrolled-executor allowlist.
+         */ relyingParty: String,
         /* 
             * The VID whose session is being elevated.
             */ subject: String,
@@ -2508,8 +2515,11 @@ public struct StepUpRequest {
             * The acr the relying party wants (e.g. `"aal2"`), if specified.
             */ targetAcr: String?,
         /* 
-            * Evidence gates the relying party will accept (`"did-signed"` / `"webauthn"`).
-            * Empty when the request did not constrain it (any supported kind is allowed).
+            * Evidence gates the relying party will accept (`"did-signed"` /
+            * `"webauthn"`). Empty when the request did not constrain it (any
+            * supported kind is allowed). The `0.2` wire spelling `didSigned` is
+            * normalised to `did-signed`, so the native layer switches on one set of
+            * strings regardless of the request version.
             */ acceptableEvidence: [String],
         /* 
             * Whether the request carried WebAuthn options — i.e. the relying party
@@ -2587,7 +2597,7 @@ public struct FfiConverterTypeStepUpRequest: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StepUpRequest {
         return
             try StepUpRequest(
-                relyingParty: FfiConverterOptionString.read(from: &buf),
+                relyingParty: FfiConverterString.read(from: &buf),
                 subject: FfiConverterString.read(from: &buf),
                 sessionId: FfiConverterString.read(from: &buf),
                 challenge: FfiConverterString.read(from: &buf),
@@ -2600,7 +2610,7 @@ public struct FfiConverterTypeStepUpRequest: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: StepUpRequest, into buf: inout [UInt8]) {
-        FfiConverterOptionString.write(value.relyingParty, into: &buf)
+        FfiConverterString.write(value.relyingParty, into: &buf)
         FfiConverterString.write(value.subject, into: &buf)
         FfiConverterString.write(value.sessionId, into: &buf)
         FfiConverterString.write(value.challenge, into: &buf)
@@ -2869,9 +2879,11 @@ public func FfiConverterTypeTaskConsentEffect_lower(_ value: TaskConsentEffect) 
  */
 public struct TaskConsentRequest {
     /**
-     * The VTA that issued the request (document `issuer`), when present.
+     * The executor that issued the request — the **proven** signer of the
+     * document's Data Integrity proof, guaranteed to be in the caller's
+     * enrolled-executor allowlist.
      */
-    public var issuer: String?
+    public var issuer: String
     /**
      * Nonce echoed + bound into the decision (never recomputed here).
      */
@@ -2942,8 +2954,10 @@ public struct TaskConsentRequest {
     /// declare one manually.
     public init(
         /* 
-         * The VTA that issued the request (document `issuer`), when present.
-         */ issuer: String?,
+         * The executor that issued the request — the **proven** signer of the
+         * document's Data Integrity proof, guaranteed to be in the caller's
+         * enrolled-executor allowlist.
+         */ issuer: String,
         /* 
             * Nonce echoed + bound into the decision (never recomputed here).
             */ challenge: String,
@@ -3094,7 +3108,7 @@ public struct FfiConverterTypeTaskConsentRequest: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TaskConsentRequest {
         return
             try TaskConsentRequest(
-                issuer: FfiConverterOptionString.read(from: &buf),
+                issuer: FfiConverterString.read(from: &buf),
                 challenge: FfiConverterString.read(from: &buf),
                 payloadDigest: FfiConverterString.read(from: &buf),
                 matchCode: FfiConverterString.read(from: &buf),
@@ -3114,7 +3128,7 @@ public struct FfiConverterTypeTaskConsentRequest: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: TaskConsentRequest, into buf: inout [UInt8]) {
-        FfiConverterOptionString.write(value.issuer, into: &buf)
+        FfiConverterString.write(value.issuer, into: &buf)
         FfiConverterString.write(value.challenge, into: &buf)
         FfiConverterString.write(value.payloadDigest, into: &buf)
         FfiConverterString.write(value.matchCode, into: &buf)
@@ -3574,6 +3588,15 @@ public enum FfiError {
      * receive). Network/protocol failures from the live mediator surface here.
      */
     case Transport(reason: String)
+    /**
+     * An inbound approval request could not be cryptographically attributed to
+     * an enrolled executor: its Data Integrity proof is missing or invalid, the
+     * proof's key is not the document issuer's, or the issuer is not in the
+     * enrolled-executor allowlist. This is the spec's `untrusted_issuer`
+     * condition — the device MUST NOT prompt; drop the request (optionally
+     * logging `reason`).
+     */
+    case UntrustedIssuer(reason: String)
 }
 
 #if swift(>=5.8)
@@ -3597,6 +3620,9 @@ public struct FfiConverterTypeFfiError: FfiConverterRustBuffer {
         case 4: return try .Transport(
                 reason: FfiConverterString.read(from: &buf)
             )
+        case 5: return try .UntrustedIssuer(
+                reason: FfiConverterString.read(from: &buf)
+            )
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -3617,6 +3643,10 @@ public struct FfiConverterTypeFfiError: FfiConverterRustBuffer {
 
         case let .Transport(reason):
             writeInt(&buf, Int32(4))
+            FfiConverterString.write(reason, into: &buf)
+
+        case let .UntrustedIssuer(reason):
+            writeInt(&buf, Int32(5))
             FfiConverterString.write(reason, into: &buf)
         }
     }
@@ -4519,33 +4549,61 @@ public func parseRevokeSessionResponse(json: String) throws -> UInt64 {
 }
 
 /**
- * Parse an inbound `auth/step-up/approve-request/0.1` Trust Task document.
+ * Verify and parse an inbound `auth/step-up/approve-request/0.1` or `/0.2`
+ * Trust Task document.
  *
- * Deserialises and structurally validates the document via `trust-tasks-rs`
- * (well-formed envelope + required payload fields + a valid Type URI), then
- * surfaces the fields the native consent UI needs. Returns [`FfiError::Decode`]
- * if the input is not a well-formed approve-request.
+ * `trusted_issuers` is the enrolled-executor allowlist the native layer holds:
+ * the enrolled VTA's DID plus any granted executor DIDs. The request's Data
+ * Integrity proof is verified first ([`crate::proof::verify_signed_request`]);
+ * an unverifiable request returns [`FfiError::UntrustedIssuer`] and MUST NOT
+ * be prompted on. Async because verification resolves the issuer's DID for its
+ * key material (through the crate's shared resolver cache).
+ *
+ * The document is then deserialised and structurally validated via
+ * `trust-tasks-rs` (well-formed envelope + required payload fields) and the
+ * fields the native consent UI needs are surfaced. Returns
+ * [`FfiError::Decode`] if the input is not a well-formed approve-request.
  */
-public func parseStepUpRequest(json: String) throws -> StepUpRequest {
-    return try FfiConverterTypeStepUpRequest.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_parse_step_up_request(
-            FfiConverterString.lower(json), $0
+public func parseStepUpRequest(json: String, trustedIssuers: [String]) async throws -> StepUpRequest {
+    return
+        try await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_func_parse_step_up_request(FfiConverterString.lower(json), FfiConverterSequenceString.lower(trustedIssuers))
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeStepUpRequest.lift,
+            errorHandler: FfiConverterTypeFfiError.lift
         )
-    })
 }
 
 /**
- * Parse an inbound `task-consent/request/0.1` for display.
+ * Verify and parse an inbound `task-consent/request/0.1` for display.
  *
- * Lenient by design (see the module note): validates the document type and the
- * binding fields the decision must echo, and surfaces the rest best-effort.
+ * `trusted_issuers` is the enrolled-executor allowlist the native layer holds:
+ * the enrolled VTA's DID plus any granted executor DIDs. The request's Data
+ * Integrity proof is verified first ([`crate::proof::verify_signed_request`]);
+ * an unverifiable request returns [`FfiError::UntrustedIssuer`] and MUST NOT
+ * be prompted on. Async because verification resolves the issuer's DID for its
+ * key material (through the crate's shared resolver cache).
+ *
+ * Field extraction stays lenient by design (see the module note): validates
+ * the document type and the binding fields the decision must echo, and
+ * surfaces the rest best-effort.
  */
-public func parseTaskConsentRequest(json: String) throws -> TaskConsentRequest {
-    return try FfiConverterTypeTaskConsentRequest.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_parse_task_consent_request(
-            FfiConverterString.lower(json), $0
+public func parseTaskConsentRequest(json: String, trustedIssuers: [String]) async throws -> TaskConsentRequest {
+    return
+        try await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_func_parse_task_consent_request(FfiConverterString.lower(json), FfiConverterSequenceString.lower(trustedIssuers))
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeTaskConsentRequest.lift,
+            errorHandler: FfiConverterTypeFfiError.lift
         )
-    })
 }
 
 /**
@@ -4757,10 +4815,10 @@ private var initializationResult: InitializationResult = {
     if uniffi_vta_mobile_core_checksum_func_parse_revoke_session_response() != 5951 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_parse_step_up_request() != 32256 {
+    if uniffi_vta_mobile_core_checksum_func_parse_step_up_request() != 63345 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_parse_task_consent_request() != 64544 {
+    if uniffi_vta_mobile_core_checksum_func_parse_task_consent_request() != 28523 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_vta_mobile_core_checksum_func_parse_whoami_response() != 41103 {

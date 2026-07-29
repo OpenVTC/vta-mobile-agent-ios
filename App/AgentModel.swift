@@ -105,6 +105,25 @@ final class AgentModel: ObservableObject {
 
     private var trimmedDid: String { vtaDid.trimmed }
 
+    /// The **enrolled-executor allowlist**: the DIDs allowed to issue signed
+    /// step-up / task-consent requests to this device. The engine verifies each
+    /// inbound request's Data Integrity proof against this list *before* the
+    /// app may show anything to the operator; an issuer outside it surfaces as
+    /// `FfiError.UntrustedIssuer` and is logged and dropped without a prompt.
+    ///
+    /// Today the device is enrolled with exactly one executor — its VTA — so
+    /// the list is just the enrolled VTA DID. This helper is the single
+    /// extension point for widening it.
+    /// TODO(enrolled-executors): include stored per-grant executor DIDs once
+    /// the app persists enrollments beyond the VTA (the enrolled-executor
+    /// model the browser plugin is growing).
+    static func trustedIssuers(vtaDid: String) -> [String] {
+        vtaDid.isEmpty ? [] : [vtaDid]
+    }
+
+    /// The allowlist for the currently configured VTA.
+    private var trustedIssuers: [String] { Self.trustedIssuers(vtaDid: trimmedDid) }
+
     init() {
         autoConnectEnabled = (UserDefaults.standard.object(forKey: "pnm.autoConnect") as? Bool) ?? true
         pushEnabled = UserDefaults.standard.bool(forKey: "pnm.pushEnabled")
@@ -350,7 +369,7 @@ final class AgentModel: ObservableObject {
         do {
             let outcome = try await VtaMobileAgent.approveStepUp(
                 approveRequest: request, transport: transport, vtaDid: trimmedDid,
-                identity: identity)
+                identity: identity, trustedIssuers: trustedIssuers)
             stepUpStatus = "✅ Approved — session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")"
             recordEvent(.approval, "Approved (pasted)",
                 "session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")")
@@ -369,7 +388,10 @@ final class AgentModel: ObservableObject {
         doc: String, transport: VtaTransport, did: String, identity: HolderIdentity
     ) async {
         do {
-            let review = try VtaMobileAgent.inspect(approveRequest: doc)
+            // `inspect` verifies the request's proof against the enrolled
+            // allowlist before returning anything showable.
+            let review = try await VtaMobileAgent.inspect(
+                approveRequest: doc, trustedIssuers: Self.trustedIssuers(vtaDid: did))
             if VtaMobileAgent.requiresReview(review) {
                 // Queue it (dedupe by session so a re-drain doesn't double-add).
                 if !pendingApprovals.contains(where: { $0.review.sessionId == review.sessionId }) {
@@ -380,12 +402,16 @@ final class AgentModel: ObservableObject {
             } else {
                 let outcome = try await VtaMobileAgent.approveStepUp(
                     approveRequest: doc, transport: transport, vtaDid: did,
-                    identity: identity)
+                    identity: identity, trustedIssuers: Self.trustedIssuers(vtaDid: did))
                 stepUpStatus =
                     "✅ Approved — session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")"
                 recordEvent(.approval, "Approved (live)",
                     "session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")")
             }
+        } catch FfiError.UntrustedIssuer(let reason) {
+            // Spec rule: an unverifiable request MUST NOT prompt. Log and drop
+            // — no notification, no queue entry, no status-line alert.
+            log("Dropped an unverifiable step-up (untrusted issuer): \(reason)")
         } catch {
             stepUpStatus = "❌ Step-up failed — \(error.localizedDescription)"
         }
@@ -409,7 +435,7 @@ final class AgentModel: ObservableObject {
             if approve {
                 _ = try await VtaMobileAgent.approveStepUp(
                     approveRequest: pending.rawDoc, transport: transport, vtaDid: trimmedDid,
-                    identity: identity)
+                    identity: identity, trustedIssuers: trustedIssuers)
                 stepUpStatus = "✅ Approved — \(pending.summary)"
                 recordEvent(
                     .approval, "Approved", pending.summary,
@@ -417,7 +443,7 @@ final class AgentModel: ObservableObject {
             } else {
                 _ = try await VtaMobileAgent.denyStepUp(
                     approveRequest: pending.rawDoc, reason: reason, transport: transport,
-                    vtaDid: trimmedDid, identity: identity)
+                    vtaDid: trimmedDid, identity: identity, trustedIssuers: trustedIssuers)
                 stepUpStatus = "🚫 Declined — \(pending.summary)"
                 recordEvent(
                     .error, "Declined", pending.summary,
@@ -476,9 +502,12 @@ final class AgentModel: ObservableObject {
     /// Queue an inbound task-consent for the operator. Takes no transport: it
     /// only parses and queues — the signed decision is submitted later by
     /// `resolveConsent`, which picks up whichever inbox is open then.
-    private func handleIncomingTaskConsent(doc: String) async {
+    private func handleIncomingTaskConsent(doc: String, did: String) async {
         do {
-            let request = try VtaMobileAgent.inspectTaskConsent(request: doc)
+            // `inspectTaskConsent` verifies the request's proof against the
+            // enrolled allowlist before returning anything showable.
+            let request = try await VtaMobileAgent.inspectTaskConsent(
+                request: doc, trustedIssuers: Self.trustedIssuers(vtaDid: did))
             // Dedupe by payloadDigest so a re-drain doesn't double-add.
             if !pendingConsents.contains(where: { $0.request.payloadDigest == request.payloadDigest })
             {
@@ -486,6 +515,10 @@ final class AgentModel: ObservableObject {
             }
             stepUpStatus = "🔔 Approval requested — \(pendingConsents.count) task-consent pending"
             notifyPendingConsent(request)
+        } catch FfiError.UntrustedIssuer(let reason) {
+            // Spec rule: an unverifiable request MUST NOT prompt. Log and drop
+            // — no notification, no queue entry, no status-line alert.
+            log("Dropped an unverifiable task-consent (untrusted issuer): \(reason)")
         } catch {
             stepUpStatus = "❌ Task-consent parse failed — \(error.localizedDescription)"
         }
@@ -509,7 +542,7 @@ final class AgentModel: ObservableObject {
             if approve {
                 let outcome = try await VtaMobileAgent.approveTaskConsent(
                     request: pending.rawDoc, transport: transport, vtaDid: trimmedDid,
-                    identity: identity)
+                    identity: identity, trustedIssuers: trustedIssuers)
                 stepUpStatus = "✅ Approved — \(pending.summary) (\(outcome.status))"
                 recordEvent(
                     .approval, "Approved task", pending.summary,
@@ -517,7 +550,7 @@ final class AgentModel: ObservableObject {
             } else {
                 _ = try await VtaMobileAgent.denyTaskConsent(
                     request: pending.rawDoc, reason: reason, transport: transport,
-                    vtaDid: trimmedDid, identity: identity)
+                    vtaDid: trimmedDid, identity: identity, trustedIssuers: trustedIssuers)
                 stepUpStatus = "🚫 Declined — \(pending.summary)"
                 recordEvent(
                     .error, "Declined task", pending.summary,
@@ -630,7 +663,7 @@ final class AgentModel: ObservableObject {
                                 await handleIncomingStepUp(
                                     doc: doc, transport: transport, did: did, identity: identity)
                             case .taskConsent(let doc):
-                                await handleIncomingTaskConsent(doc: doc)
+                                await handleIncomingTaskConsent(doc: doc, did: did)
                             }
                         }
                         await session.shutdown()
@@ -656,7 +689,7 @@ final class AgentModel: ObservableObject {
                                 await handleIncomingStepUp(
                                     doc: doc, transport: transport, did: did, identity: identity)
                             case .taskConsent(let doc):
-                                await handleIncomingTaskConsent(doc: doc)
+                                await handleIncomingTaskConsent(doc: doc, did: did)
                             }
                         }
                         await session.shutdown()
@@ -815,7 +848,7 @@ final class AgentModel: ObservableObject {
                     await handleIncomingStepUp(
                         doc: doc, transport: wakeTransport, did: cfg.vtaDid, identity: id)
                 case .taskConsent(let doc):
-                    await handleIncomingTaskConsent(doc: doc)
+                    await handleIncomingTaskConsent(doc: doc, did: cfg.vtaDid)
                 }
             }
             pushStatus = handledAny ? "✅ Push wake serviced." : "Woken by push — nothing pending."

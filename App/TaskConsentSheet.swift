@@ -125,13 +125,14 @@ struct TaskConsentSheet: View {
     }
 
     @ViewBuilder private var requester: some View {
-        if let issuer = request.issuer {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Delivered by").font(.caption2).foregroundStyle(.secondary)
-                DidLabel(did: issuer, caption: "your VTA")
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+        // The issuer is the *proven* signer of the request's Data Integrity
+        // proof (verified on-device before this sheet can exist), so it is
+        // always present.
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Delivered by").font(.caption2).foregroundStyle(.secondary)
+            DidLabel(did: request.issuer, caption: "your VTA · proof verified")
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder private var buttons: some View {

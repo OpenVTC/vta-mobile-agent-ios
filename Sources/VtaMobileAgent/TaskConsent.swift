@@ -24,11 +24,20 @@ extension VtaMobileAgent {
         public let status: String
     }
 
-    /// Parse an inbound `task-consent/request/0.1` (the DIDComm `body`) into the
-    /// fields the approval UI shows — effects, side-effect/exposure class, the
-    /// requester, and the match code. Throws if it isn't a well-formed request.
-    public static func inspectTaskConsent(request doc: String) throws -> TaskConsentRequest {
-        try parseTaskConsentRequest(json: doc)
+    /// Parse **and verify** an inbound `task-consent/request/0.1` (the DIDComm
+    /// `body`) into the fields the approval UI shows — effects,
+    /// side-effect/exposure class, the requester, and the match code.
+    ///
+    /// The engine verifies the request's `eddsa-jcs-2022` Data Integrity proof
+    /// and that the proven signer is in `trustedIssuers` (the enrolled-executor
+    /// allowlist) *before* returning anything. Throws
+    /// `FfiError.UntrustedIssuer` for an unverifiable request — the caller MUST
+    /// log and drop it without prompting the operator (spec rule: an
+    /// unverifiable request MUST NOT prompt).
+    public static func inspectTaskConsent(
+        request doc: String, trustedIssuers: [String]
+    ) async throws -> TaskConsentRequest {
+        try await parseTaskConsentRequest(json: doc, trustedIssuers: trustedIssuers)
     }
 
     /// **Approve** the task described by `request` (a `task-consent/request/0.1`
@@ -45,9 +54,10 @@ extension VtaMobileAgent {
         request doc: String,
         transport: VtaTransport,
         vtaDid: String,
-        identity: HolderIdentity
+        identity: HolderIdentity,
+        trustedIssuers: [String]
     ) async throws -> TaskConsentOutcome {
-        let request = try parseTaskConsentRequest(json: doc)
+        let request = try await parseTaskConsentRequest(json: doc, trustedIssuers: trustedIssuers)
         let draft = TaskConsentDecisionDraft(
             id: "urn:uuid:\(UUID().uuidString)",
             issuerDid: identity.didKey,  // the approver (us) — the proof carries our authority
@@ -72,9 +82,10 @@ extension VtaMobileAgent {
         reason: String,
         transport: VtaTransport,
         vtaDid: String,
-        identity: HolderIdentity
+        identity: HolderIdentity,
+        trustedIssuers: [String]
     ) async throws -> TaskConsentOutcome {
-        let request = try parseTaskConsentRequest(json: doc)
+        let request = try await parseTaskConsentRequest(json: doc, trustedIssuers: trustedIssuers)
         let draft = TaskConsentDecisionDraft(
             id: "urn:uuid:\(UUID().uuidString)",
             issuerDid: identity.didKey,

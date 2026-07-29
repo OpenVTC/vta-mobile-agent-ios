@@ -41,16 +41,16 @@ struct ReviewSheet: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    if let rp = pending.review.relyingParty {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Requested by").font(.caption2).foregroundStyle(.secondary)
-                            // The name, if this DID has one that checks out, over
-                            // the DID itself — the operator has to be able to
-                            // audit one against the other before approving.
-                            DidLabel(did: rp, caption: "verified by your VTA")
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Requested by").font(.caption2).foregroundStyle(.secondary)
+                        // The name, if this DID has one that checks out, over
+                        // the DID itself — the operator has to be able to
+                        // audit one against the other before approving. The DID
+                        // is the *proven* signer of the request's proof, so it
+                        // is always present.
+                        DidLabel(did: pending.review.relyingParty, caption: "proof verified on-device")
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
                     Text(
                         "Only you can authorize this. Approve signs with your device key; "
