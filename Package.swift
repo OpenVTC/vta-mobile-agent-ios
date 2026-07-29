@@ -16,8 +16,8 @@ import PackageDescription
 // checkout must use the local-xcframework override below (build it with
 // `vta-mobile-core/scripts/package-ios.sh`) — the v0.6.16 binary no longer
 // matches the vendored bindings.
-let engineTag = "vta-mobile-core-v0.6.16"
-let engineChecksum = "267504d574d3ac1a244df1d83fa84db1cb4f9cf7a819df2f50a5885e93726984"
+let engineTag = "vta-mobile-core-v0.6.17"
+let engineChecksum = "d8e417d06797ce27bf47d54f0e946aabd7cd4198f3d613481cbfe3fdc484258b"
 
 // Local-dev override: iterate against a locally-built xcframework without a
 // published release. Drop (or symlink) a `VtaMobileCore.xcframework` at the
