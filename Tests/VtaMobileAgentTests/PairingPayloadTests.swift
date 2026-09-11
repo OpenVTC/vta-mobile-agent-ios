@@ -23,7 +23,7 @@ final class PairingPayloadTests: XCTestCase {
         XCTAssertNil(p?.vtaURL)
     }
 
-    /// The DID alone is enough — the operator fills the mediator in Settings.
+    /// The DID alone is enough — the mediator comes from the VTA's DID document.
     func testParsesDidOnlyUrl() {
         let p = PairingPayload.parse("cierge-pair://v1?did=did:webvh:vta")
         XCTAssertEqual(p?.vtaDID, "did:webvh:vta")
@@ -38,11 +38,13 @@ final class PairingPayloadTests: XCTestCase {
         XCTAssertEqual(p?.vtaURL, "https://vta.example")
     }
 
-    func testParsesRawJson() {
-        let json = #"{"vtaURL":"https://v","vtaDID":"did:webvh:v","tenant":"acme"}"#
-        let p = PairingPayload.parse(json)
-        XCTAssertEqual(p?.vtaDID, "did:webvh:v")
-        XCTAssertEqual(p?.tenant, "acme")
+    /// Only the `cierge-pair://` form is a pairing code; a bare JSON object —
+    /// with or without a gateway — is ignored like any other stray QR.
+    func testRejectsRawJson() {
+        XCTAssertNil(
+            PairingPayload.parse(#"{"vtaURL":"https://v","vtaDID":"did:webvh:v","tenant":"acme"}"#))
+        XCTAssertNil(
+            PairingPayload.parse(#"{"vtaDID":"did:webvh:v","gatewayURL":"http://169.254.169.254/"}"#))
     }
 
     func testRejectsJunkOrIncomplete() {

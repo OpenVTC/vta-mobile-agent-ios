@@ -2,13 +2,20 @@ import SwiftUI
 import VtaMobileAgent
 
 /// Everything configuration: where the VTA is, appearance (theme), auto-connect,
-/// and the device identity. Edits auto-save, so the agent picks them up on the
-/// next (automatic) connect.
+/// and the device identity. Connection fields are drafts until Save, which
+/// sends them through the same review and confirmation as a scanned pairing
+/// code.
 struct SettingsTab: View {
     @EnvironmentObject private var model: AgentModel
     @EnvironmentObject private var themeManager: ThemeManager
     @Environment(\.theme) private var theme
     @State private var showScanner = false
+    /// A code read by the scanner, staged only once the scanner sheet has fully
+    /// dismissed so the confirmation sheet can present.
+    @State private var scannedPairing: PairingPayload?
+    @State private var draftVtaDid = ""
+    @State private var draftGatewayUrl = ""
+    @State private var draftsLoaded = false
 
     var body: some View {
         ScreenScaffold(title: "Settings") {
@@ -18,6 +25,50 @@ struct SettingsTab: View {
             identityCard
             connectionControls
         }
+        .onAppear {
+            guard !draftsLoaded else { return }
+            draftsLoaded = true
+            resetDrafts()
+        }
+        // The saved configuration only changes through a confirmed pairing or
+        // the launch-time load; refresh the drafts when it does.
+        .onChange(of: savedConfiguration) { _ in resetDrafts() }
+        .sheet(item: $model.pendingPairing) { review in
+            PairingConfirmSheet(review: review, model: model)
+        }
+    }
+
+    private var savedConfiguration: String { "\(model.vtaDid)\n\(model.gatewayUrl)" }
+
+    private var hasDraftChanges: Bool {
+        draftVtaDid.trimmed != model.vtaDid.trimmed
+            || draftGatewayUrl.trimmed != model.gatewayUrl.trimmed
+    }
+
+    /// No point staging an empty DID or a gateway URL that breaks a hard rule.
+    private var canSave: Bool {
+        guard !draftVtaDid.trimmed.isEmpty, !model.busy else { return false }
+        guard !draftGatewayUrl.trimmed.isEmpty else { return true }
+        if case .failure = GatewayURLPolicy.validateStructure(draftGatewayUrl) { return false }
+        return true
+    }
+
+    private func resetDrafts() {
+        draftVtaDid = model.vtaDid
+        draftGatewayUrl = model.gatewayUrl
+    }
+
+    private func saveDrafts() {
+        let gateway = draftGatewayUrl.trimmed
+        let payload = PairingPayload(
+            vtaDID: draftVtaDid.trimmed, gatewayURL: gateway.isEmpty ? nil : gateway)
+        Task { await model.stagePairing(payload) }
+    }
+
+    private func stageScannedPairing() {
+        guard let payload = scannedPairing else { return }
+        scannedPairing = nil
+        Task { await model.stagePairing(payload) }
     }
 
     private var vtaCard: some View {
@@ -33,32 +84,54 @@ struct SettingsTab: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            Text("Or enter the VTA's DID and tap Resolve to fill the mediator.")
+            .disabled(model.busy)
+            Text("Or enter the VTA's DID and tap Save. Either way you review the VTA, "
+                + "its mediator and push gateway before anything changes.")
                 .font(.caption).foregroundStyle(.secondary)
 
             ThemedField(title: "VTA DID", prompt: "did:webvh:… / did:web:…",
-                text: $model.vtaDid, mono: true)
-            DidNameNote(did: model.vtaDid)
-            Button {
-                Task { await model.resolveFromDid() }
-            } label: {
-                Label("Resolve endpoints from DID", systemImage: "arrow.down.circle")
-            }
-            .font(.subheadline.weight(.semibold))
-            .disabled(model.busy)
+                text: $draftVtaDid, mono: true)
+            DidNameNote(did: draftVtaDid)
 
-            ThemedField(title: "Mediator DID", prompt: "did:web:… / did:webvh:…",
-                text: $model.mediatorDid, mono: true)
-            DidNameNote(did: model.mediatorDid)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Mediator DID (read from the VTA's DID document)")
+                    .font(.caption).foregroundStyle(.secondary)
+                if model.mediatorDid.trimmed.isEmpty {
+                    Text("Filled in when you pair.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                } else {
+                    DidLabel(did: model.mediatorDid.trimmed)
+                }
+            }
+
             ThemedField(title: "Push gateway URL (optional)", prompt: "https://gw.example",
-                text: $model.gatewayUrl, keyboard: .URL, mono: true)
-            GatewayURLNote(raw: model.gatewayUrl, vtaDid: model.vtaDid)
+                text: $draftGatewayUrl, keyboard: .URL, mono: true)
+            GatewayURLNote(raw: draftGatewayUrl, vtaDid: draftVtaDid)
+
+            if let error = model.pairingError {
+                Label(error, systemImage: "xmark.octagon.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 12) {
+                Button(action: saveDrafts) {
+                    HStack(spacing: 6) {
+                        if model.busy { ProgressView() }
+                        Text("Save")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canSave)
+                if hasDraftChanges {
+                    Button("Discard changes", action: resetDrafts)
+                        .font(.subheadline)
+                }
+            }
         }
-        .onChange(of: model.vtaDid) { _ in model.saveConfig() }
-        .onChange(of: model.mediatorDid) { _ in model.saveConfig() }
-        .onChange(of: model.gatewayUrl) { _ in model.saveConfig() }
-        .sheet(isPresented: $showScanner) {
-            PairingScanner { model.applyPairing($0) }
+        .sheet(isPresented: $showScanner, onDismiss: stageScannedPairing) {
+            PairingScanner { scannedPairing = $0 }
         }
     }
 
