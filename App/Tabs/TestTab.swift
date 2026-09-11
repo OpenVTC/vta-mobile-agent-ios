@@ -62,7 +62,8 @@ struct TestTab: View {
         Card(tint: .teal) {
             CardHeader(title: "Live approver", systemImage: "dot.radiowaves.left.and.right", tint: .teal)
             Text(model.listening
-                ? "Listening on the mediator. Incoming approve-requests are ratified automatically."
+                ? "Listening on the mediator. Incoming approve-requests are queued for your review "
+                    + "(sign-ins auto-approve only if that's turned on in Settings)."
                 : "Listen on the mediator and approve step-ups relayed from other devices, live.")
                 .font(.caption).foregroundStyle(.secondary)
             Button {

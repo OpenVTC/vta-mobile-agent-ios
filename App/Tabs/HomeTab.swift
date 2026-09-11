@@ -47,7 +47,9 @@ struct HomeTab: View {
                         Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
                     }
                     Text(model.listening
-                        ? "Connected and listening for approval requests. Step-ups are approved on this device — nothing for you to do."
+                        ? (model.autoApproveSignIns
+                            ? "Connected and listening for approval requests. Sign-ins are approved on this device while the app is open; anything else asks you."
+                            : "Connected and listening for approval requests. You'll be asked to approve each one.")
                         : "Connected. Set a mediator DID in Settings to approve step-ups live.")
                         .font(.footnote).foregroundStyle(.secondary)
                         .padding(.top, 2)

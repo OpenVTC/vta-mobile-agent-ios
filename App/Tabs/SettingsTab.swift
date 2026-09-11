@@ -160,6 +160,16 @@ struct SettingsTab: View {
             .onChange(of: model.useTsp) { _ in
                 Task { await model.restartListeningIfActive() }
             }
+            Toggle(isOn: $model.autoApproveSignIns) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Auto-approve sign-ins").font(.subheadline)
+                    Text("Approve plain sign-in requests from your VTA without asking, only while "
+                        + "the app is open. Requests with details, and anything that arrives in "
+                        + "the background, always ask.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .tint(.green)
         }
     }
 

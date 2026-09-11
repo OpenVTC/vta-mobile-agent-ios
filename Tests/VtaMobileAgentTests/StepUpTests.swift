@@ -32,4 +32,25 @@ final class StepUpTests: XCTestCase {
     func testUnwrapPassesThroughNonJSON() {
         XCTAssertEqual(VtaMobileAgent.unwrapApproveRequest("not json"), "not json")
     }
+
+    /// The review-based `StepUpPolicy.decide` keys off the authorization context.
+    func testStepUpPolicyDecidesFromTheReview() throws {
+        let context = try XCTUnwrap(
+            AuthorizationContext.decode(
+                fromJSON: #"{"domain":"d","summary":"s","risk":"low","action":{"kind":"teleport"}}"#))
+        func review(_ ctx: AuthorizationContext?) -> VtaMobileAgent.StepUpReview {
+            VtaMobileAgent.StepUpReview(
+                reason: "Approve sign-in", subject: "did:key:zAlice", sessionId: "s1",
+                targetAcr: "aal2", authorizationContext: ctx, relyingParty: "did:key:zVta")
+        }
+        XCTAssertEqual(
+            StepUpPolicy.decide(review: review(nil), appActive: true, autoApproveSignIns: true),
+            .autoApprove)
+        XCTAssertEqual(
+            StepUpPolicy.decide(review: review(nil), appActive: false, autoApproveSignIns: true),
+            .queueForReview)
+        XCTAssertEqual(
+            StepUpPolicy.decide(review: review(context), appActive: true, autoApproveSignIns: true),
+            .queueForReview)
+    }
 }

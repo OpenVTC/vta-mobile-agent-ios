@@ -8,7 +8,8 @@ import VtaMobileCore
 /// - captures the APNs **device token** → registers the wake channel
 ///   (`AgentModel.onApnsToken` → `push/register` + `device/set-wake`),
 /// - handles a **background (contentless) push** → drains the mediator and
-///   ratifies any queued step-up (`AgentModel.handlePushWake`).
+///   queues any step-up for review with a notification
+///   (`AgentModel.handlePushWake`); nothing is approved in the background.
 ///
 /// All work is delegated to the shared `AgentModel`; this class is just the
 /// UIKit seam SwiftUI doesn't expose directly.
@@ -79,15 +80,15 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         Task { await AgentModel.shared.onApnsRegisterFailed(error) }
     }
 
-    /// Background (`content-available`) push — the contentless wake. Drain +
-    /// ratify, then report whether anything arrived so the OS can schedule the
-    /// next background opportunity appropriately.
+    /// Background (`content-available`) push — the contentless wake. Drain into
+    /// the review queue, then report whether anything arrived so the OS can
+    /// schedule the next background opportunity appropriately.
     func application(
         _ application: UIApplication,
         didReceiveRemoteNotification userInfo: [AnyHashable: Any]
     ) async -> UIBackgroundFetchResult {
-        let approved = await AgentModel.shared.handlePushWake()
-        return approved ? .newData : .noData
+        let received = await AgentModel.shared.handlePushWake()
+        return received ? .newData : .noData
     }
 
     /// Show foreground notifications too, so a live test is visible while the app

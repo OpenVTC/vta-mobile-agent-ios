@@ -71,6 +71,13 @@ final class AgentModel: ObservableObject {
         didSet { UserDefaults.standard.set(useTsp, forKey: "pnm.useTsp") }
     }
 
+    /// Ratify plain sign-in step-ups (no authorization context) without asking,
+    /// and only while the app is in the foreground — see `StepUpPolicy`.
+    /// Default off: every step-up is queued for the operator.
+    @Published var autoApproveSignIns = false {
+        didSet { UserDefaults.standard.set(autoApproveSignIns, forKey: "pnm.autoApproveSignIns") }
+    }
+
     // Test-tab scratch.
     @Published var pastedApproveRequest = ""
 
@@ -139,6 +146,7 @@ final class AgentModel: ObservableObject {
         autoConnectEnabled = (UserDefaults.standard.object(forKey: "pnm.autoConnect") as? Bool) ?? true
         pushEnabled = UserDefaults.standard.bool(forKey: "pnm.pushEnabled")
         useTsp = UserDefaults.standard.bool(forKey: "pnm.useTsp")
+        autoApproveSignIns = UserDefaults.standard.bool(forKey: "pnm.autoApproveSignIns")
     }
 
     // MARK: Derived presentation state
@@ -439,18 +447,23 @@ final class AgentModel: ObservableObject {
 
     // MARK: Human-in-the-loop review gate
 
-    /// Route an incoming step-up: an AI ask carrying a structured authorization
-    /// context is surfaced for the operator's consent; a plain login-elevation
-    /// step-up (no context) is auto-ratified.
+    /// Route an incoming step-up through `StepUpPolicy`. A plain sign-in (no
+    /// authorization context) is ratified straight away only while the app is
+    /// active and "Auto-approve sign-ins" is on. Everything else — an ask
+    /// carrying an authorization context, or anything arriving on a background
+    /// wake — is queued for the operator's Approve/Deny with a notification.
     private func handleIncomingStepUp(
-        doc: String, transport: VtaTransport, did: String, identity: HolderIdentity
+        doc: String, transport: VtaTransport, did: String, identity: HolderIdentity,
+        appActive: Bool
     ) async {
         do {
             // `inspect` verifies the request's proof against the enrolled
             // allowlist before returning anything showable.
             let review = try await VtaMobileAgent.inspect(
                 approveRequest: doc, trustedIssuers: Self.trustedIssuers(vtaDid: did))
-            if VtaMobileAgent.requiresReview(review) {
+            let decision = StepUpPolicy.decide(
+                review: review, appActive: appActive, autoApproveSignIns: autoApproveSignIns)
+            if decision == .queueForReview {
                 // Queue it (dedupe by session so a re-drain doesn't double-add).
                 if !pendingApprovals.contains(where: { $0.review.sessionId == review.sessionId }) {
                     pendingApprovals.append(PendingApproval(rawDoc: doc, review: review))
@@ -719,7 +732,8 @@ final class AgentModel: ObservableObject {
                             switch inbound {
                             case .stepUp(let doc):
                                 await handleIncomingStepUp(
-                                    doc: doc, transport: transport, did: did, identity: identity)
+                                    doc: doc, transport: transport, did: did, identity: identity,
+                                    appActive: UIApplication.shared.applicationState == .active)
                             case .taskConsent(let doc):
                                 await handleIncomingTaskConsent(doc: doc, did: did)
                             }
@@ -745,7 +759,8 @@ final class AgentModel: ObservableObject {
                             switch inbound {
                             case .stepUp(let doc):
                                 await handleIncomingStepUp(
-                                    doc: doc, transport: transport, did: did, identity: identity)
+                                    doc: doc, transport: transport, did: did, identity: identity,
+                                    appActive: UIApplication.shared.applicationState == .active)
                             case .taskConsent(let doc):
                                 await handleIncomingTaskConsent(doc: doc, did: did)
                             }
@@ -878,7 +893,8 @@ final class AgentModel: ObservableObject {
     }
 
     /// A contentless wake arrived (background push). Re-establish what we need and
-    /// drain any queued approve-requests, ratifying each with the holder key.
+    /// drain any queued requests into the review queue, notifying for each —
+    /// nothing is approved in the background.
     func handlePushWake() async -> Bool {
         guard let cfg = Self.loadConnection() else {
             pushStatus = "Push received, but no saved VTA connection — open the app and connect."
@@ -912,13 +928,14 @@ final class AgentModel: ObservableObject {
                         session: session, timeoutSecs: 5)
                 else { break }
                 handledAny = true
-                // Same gate as the live listener: surface the ask for consent
-                // (posting the actionable notification — ideal for a background
-                // wake); a plain login step-up auto-ratifies.
+                // Same policy as the live listener, with the app not active:
+                // every step-up is queued and posts the actionable
+                // notification. A background wake never approves on its own.
                 switch inbound {
                 case .stepUp(let doc):
                     await handleIncomingStepUp(
-                        doc: doc, transport: wakeTransport, did: cfg.vtaDid, identity: id)
+                        doc: doc, transport: wakeTransport, did: cfg.vtaDid, identity: id,
+                        appActive: false)
                 case .taskConsent(let doc):
                     await handleIncomingTaskConsent(doc: doc, did: cfg.vtaDid)
                 }
