@@ -143,11 +143,16 @@ struct TestTab: View {
             if let push = model.pushStatus {
                 Text(push).font(.footnote).padding(.top, 2)
             }
-            if let token = model.apnsToken {
-                Text("APNs token (for test-wake-apns):")
-                    .font(.caption2).foregroundStyle(.secondary).padding(.top, 4)
-                MonoCopyRow(value: token, lineLimit: 3)
-            }
+            // Debug builds only, and only a prefix: enough to tell which
+            // registration is live without putting the token on screen.
+            #if DEBUG
+                if let token = model.apnsToken {
+                    Text("APNs token: \(String(token.prefix(8)))…")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 4)
+                }
+            #endif
         }
     }
 }

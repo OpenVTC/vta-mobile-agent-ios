@@ -21,10 +21,16 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         // Surface the engine's (and the affinidi/rustls stack's) logs to the
         // Xcode console, so on-device network/DIDComm failures are diagnosable.
         // `vta_mobile_core`/`vta_sdk`/`affinidi_messaging_sdk` at debug shows the
-        // mediator connect + TLS path; everything else stays at info.
-        initLogging(
-            directives: "info,vta_mobile_core=debug,vta_sdk=debug,affinidi_messaging_sdk=debug,"
-                + "affinidi_messaging_didcomm=debug,affinidi_did_resolver_cache_sdk=debug")
+        // mediator connect + TLS path; everything else stays at info. Other
+        // builds log warnings and errors only.
+        #if DEBUG
+            let directives =
+                "info,vta_mobile_core=debug,vta_sdk=debug,affinidi_messaging_sdk=debug,"
+                + "affinidi_messaging_didcomm=debug,affinidi_did_resolver_cache_sdk=debug"
+        #else
+            let directives = "warn"
+        #endif
+        initLogging(directives: directives)
         UNUserNotificationCenter.current().delegate = self
         registerApprovalCategory()
         return true

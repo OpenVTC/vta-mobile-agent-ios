@@ -839,7 +839,6 @@ final class AgentModel: ObservableObject {
     /// to the gateway, then `device/set-wake` to the VTA.
     func onApnsToken(_ hex: String) async {
         apnsToken = hex
-        print("[vta-agent] APNs device token: \(hex)")
         guard let identity, let transport, !trimmedDid.isEmpty else {
             pushStatus = "Got APNs token — connect to a VTA first, then enable push."
             return
