@@ -197,11 +197,22 @@ final class AgentModel: ObservableObject {
         // clients scan (see `PairingPayload`).
         vtaDid = p.vtaDID
         if let m = p.mediatorDID { mediatorDid = m }
-        if let g = p.gatewayURL { gatewayUrl = g }
+        var gatewayNote: String?
+        if let g = p.gatewayURL {
+            switch GatewayURLPolicy.validateStructure(g) {
+            case .success(let url):
+                gatewayUrl = url.absoluteString
+                gatewayNote = GatewayURLPolicy.bindingWarning(for: url, vtaDID: p.vtaDID)?
+                    .localizedDescription
+            case .failure(let refusal):
+                gatewayNote = "gateway not saved: \(refusal.localizedDescription)"
+            }
+        }
         persistConnection()
         recordEvent(
             .info, "Paired via QR", p.tenant.map { "tenant · \($0)" }, did: p.vtaDID)
-        status = "Paired — connecting…"
+        if let gatewayNote { recordEvent(.error, "Pairing gateway", gatewayNote) }
+        status = "Paired — connecting…" + (gatewayNote.map { " (\($0))" } ?? "")
         Task { await connect() }
     }
 
@@ -771,10 +782,24 @@ final class AgentModel: ObservableObject {
             pushStatus = "Got APNs token — connect to a VTA first, then enable push."
             return
         }
-        let gw = gatewayUrl.trimmed
-        guard let gatewayURL = URL(string: gw), gatewayURL.scheme != nil else {
+        guard !gatewayUrl.trimmed.isEmpty else {
             pushStatus = "Set the push gateway URL in Settings before enabling push."
             return
+        }
+        // Use-time check: the same hard rules as when the URL was saved, in case
+        // it predates them. The domain binding is only a warning, already shown
+        // when the URL was saved, so here it is logged rather than enforced.
+        let gatewayURL: URL
+        switch GatewayURLPolicy.validateStructure(gatewayUrl) {
+        case .success(let url):
+            gatewayURL = url
+        case .failure(let refusal):
+            pushStatus = "❌ Push gateway URL refused — \(refusal.localizedDescription)"
+            recordEvent(.error, "Push gateway URL refused", refusal.localizedDescription)
+            return
+        }
+        if let warning = GatewayURLPolicy.bindingWarning(for: gatewayURL, vtaDID: trimmedDid) {
+            log("Push gateway: \(warning.localizedDescription)")
         }
         let mediator = mediatorDid.trimmed
         do {

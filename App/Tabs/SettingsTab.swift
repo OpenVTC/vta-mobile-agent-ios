@@ -52,6 +52,7 @@ struct SettingsTab: View {
             DidNameNote(did: model.mediatorDid)
             ThemedField(title: "Push gateway URL (optional)", prompt: "https://gw.example",
                 text: $model.gatewayUrl, keyboard: .URL, mono: true)
+            GatewayURLNote(raw: model.gatewayUrl, vtaDid: model.vtaDid)
         }
         .onChange(of: model.vtaDid) { _ in model.saveConfig() }
         .onChange(of: model.mediatorDid) { _ in model.saveConfig() }
@@ -137,6 +138,34 @@ struct SettingsTab: View {
                 Task { await model.connect() }
             }
         }
+    }
+}
+
+/// Live feedback under the push-gateway field: why the URL will be refused, or
+/// a warning when its host is outside the VTA's own domain.
+struct GatewayURLNote: View {
+    let raw: String
+    let vtaDid: String
+
+    var body: some View {
+        if let problem {
+            Label(
+                problem.localizedDescription,
+                systemImage: problem.isWarning
+                    ? "exclamationmark.triangle.fill" : "xmark.octagon.fill"
+            )
+            .font(.caption2)
+            .foregroundStyle(problem.isWarning ? Color.orange : Color.red)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var problem: GatewayURLError? {
+        guard !raw.trimmed.isEmpty else { return nil }
+        if case .failure(let error) = GatewayURLPolicy.validate(raw, vtaDID: vtaDid.trimmed) {
+            return error
+        }
+        return nil
     }
 }
 
