@@ -38,8 +38,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
     /// Register the Approve/Deny actions shown inline on an approval
     /// notification. Both require the device be unlocked
-    /// (`.authenticationRequired`); Approve foregrounds so the enclave key's
-    /// biometric sign can run.
+    /// (`.authenticationRequired`); Approve foregrounds the app so the
+    /// device-owner confirmation — Face ID, Touch ID or the passcode — can be
+    /// shown before the approval is signed.
     private func registerApprovalCategory() {
         let approve = UNNotificationAction(
             identifier: AgentModel.approveActionId, title: "Approve",

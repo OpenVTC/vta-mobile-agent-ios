@@ -6,9 +6,10 @@ import VtaMobileCore
 /// approving device for a privileged Trust Task (e.g. a delegated `did:webvh`
 /// update). Shows what executing the task would do (the VTA's dry-run effects),
 /// a match code to compare against the requesting screen, and lets the operator
-/// **Approve** (Face ID fires as the enclave key signs) or **Deny with a reason**
-/// (a holder-signed refusal the VTA records). Presented for the front of
-/// `AgentModel.pendingConsents`.
+/// **Approve** (the device owner confirms with Face ID, Touch ID or the
+/// passcode, then the holder key signs) or **Deny with a reason** (a
+/// holder-signed refusal the VTA records, sent without a check). Presented for
+/// the front of `AgentModel.pendingConsents`.
 struct TaskConsentSheet: View {
     let pending: PendingConsent
     @ObservedObject var model: AgentModel
@@ -51,8 +52,8 @@ struct TaskConsentSheet: View {
 
                     Text(
                         "Only approve if the code above matches the one shown on the device that "
-                            + "requested this change. Approve signs with your device key; Deny sends "
-                            + "a signed refusal."
+                            + "requested this change. Approve asks for Face ID or your passcode, "
+                            + "then signs with your device key; Deny sends a signed refusal."
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)

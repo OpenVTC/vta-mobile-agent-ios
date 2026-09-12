@@ -5,7 +5,8 @@ import VtaMobileCore
 /// device for a privileged Trust Task (e.g. a delegated `did:webvh` update). The
 /// VTA pushes a signed `task-consent/request/0.1` to this device over DIDComm;
 /// the operator sees *what executing the task would do* (the VTA's dry-run
-/// effects) and a match code, and — behind a biometric — the device returns a
+/// effects) and a match code, and — once the device owner has confirmed with
+/// Face ID, Touch ID or the passcode (``ApprovalGate``) — the device returns a
 /// holder-signed `task-consent/decision/0.1`. The decision's Data Integrity
 /// proof is the approver's authority: the VTA takes the signer from it and, if
 /// the signer is a member of the policy's approver set (and, for a delegated

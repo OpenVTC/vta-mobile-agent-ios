@@ -32,6 +32,12 @@ public enum AgentError: Error, LocalizedError {
 /// This is the "Tier 2" software-held custody profile; a future Tier-1 build can
 /// swap in a P-256 enclave key behind this same `Signer` seam once the VTA
 /// accepts an ES256/P-256 proof.
+///
+/// The seed is stored device-bound and excluded from backups — see ``Keychain``
+/// — but it is software-held: the key is in this process's memory for the
+/// session, and the engine derives the DIDComm keys from it. Nothing about
+/// storing it proves a person is present, so every approval asks separately
+/// (``ApprovalGate``).
 public final class HolderIdentity: Signer {
     private let privateKey: Curve25519.Signing.PrivateKey
 
@@ -120,41 +126,6 @@ public final class HolderIdentity: Signer {
             holderDid: didKey,
             holderSigningPrivateEd25519: privateKey.rawRepresentation,
             mediatorDid: mediatorDid)
-    }
-}
-
-/// Minimal Keychain wrapper for a single generic-password item (the holder key).
-enum Keychain {
-    private static let service = "org.openvtc.vta.agent"
-
-    static func read(account: String) throws -> Data? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess, let data = item as? Data else {
-            throw AgentError.keychain(status)
-        }
-        return data
-    }
-
-    static func write(account: String, data: Data) throws {
-        let base: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        SecItemDelete(base as CFDictionary) // idempotent replace
-        var add = base
-        add[kSecValueData as String] = data
-        let status = SecItemAdd(add as CFDictionary, nil)
-        guard status == errSecSuccess else { throw AgentError.keychain(status) }
     }
 }
 

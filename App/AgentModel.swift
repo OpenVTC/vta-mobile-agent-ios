@@ -141,8 +141,13 @@ final class AgentModel: ObservableObject {
     /// Confirms the device owner before a pairing replaces a different VTA.
     private let ownerAuthenticator: DeviceOwnerAuthenticator
 
+    /// The same device-owner check, applied to every approval this device sends
+    /// — step-ups, task consents and pasted requests. Denials go without it.
+    private let approvalGate: ApprovalGate
+
     init(ownerAuthenticator: DeviceOwnerAuthenticator = LocalDeviceOwnerAuthenticator()) {
         self.ownerAuthenticator = ownerAuthenticator
+        approvalGate = ApprovalGate(authenticator: ownerAuthenticator)
         autoConnectEnabled = (UserDefaults.standard.object(forKey: "pnm.autoConnect") as? Bool) ?? true
         pushEnabled = UserDefaults.standard.bool(forKey: "pnm.pushEnabled")
         useTsp = UserDefaults.standard.bool(forKey: "pnm.useTsp")
@@ -433,17 +438,31 @@ final class AgentModel: ObservableObject {
         defer { busy = false }
         stepUpStatus = "Approving…"
         do {
-            let outcome = try await VtaMobileAgent.approveStepUp(
-                approveRequest: request, transport: transport, vtaDid: trimmedDid,
-                identity: identity, trustedIssuers: trustedIssuers)
+            let outcome = try await approvalGate.submit(
+                approving: true, reason: Self.approveRequestReason
+            ) {
+                try await VtaMobileAgent.approveStepUp(
+                    approveRequest: request, transport: transport, vtaDid: trimmedDid,
+                    identity: identity, trustedIssuers: trustedIssuers)
+            }
             stepUpStatus = "✅ Approved — session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")"
             recordEvent(.approval, "Approved (pasted)",
                 "session \(outcome.sessionId) → \(outcome.grantedAcr ?? "—")")
             pastedApproveRequest = ""
+        } catch let error as ApprovalGateError {
+            // Nothing was signed or sent, and the pasted request is kept so the
+            // operator can try again.
+            stepUpStatus = "🚫 \(error.localizedDescription)"
+            recordEvent(.error, "Approval not authorized", "pasted request")
         } catch {
             stepUpStatus = "❌ Approve failed — \(error.localizedDescription)"
         }
     }
+
+    /// What the system prompt says the operator is confirming. `LAContext` shows
+    /// it verbatim, so it has to read as a reason.
+    static let approveRequestReason = "Confirm it's you to approve this request"
+    static let approveTaskReason = "Confirm it's you to approve this change"
 
     // MARK: Human-in-the-loop review gate
 
@@ -489,9 +508,11 @@ final class AgentModel: ObservableObject {
     }
 
     /// Resolve a specific queued ask (by session), or the front one if `sessionId`
-    /// isn't found (e.g. a notification action with no target). Approve signs
-    /// (Face ID fires as the enclave key signs); Deny sends a holder-signed
-    /// refusal the VTA audits. A fresh token is fetched — the ask may have sat.
+    /// isn't found (e.g. a notification action with no target). Approve asks the
+    /// device owner to confirm — Face ID, Touch ID or the passcode, through
+    /// ``ApprovalGate`` — and only then signs with the holder key; Deny sends a
+    /// holder-signed refusal the VTA audits, with no check. A refused or
+    /// cancelled confirmation leaves the ask queued.
     func resolveApproval(
         sessionId: String? = nil, approve: Bool, reason: String = "Declined by the operator"
     ) async {
@@ -503,18 +524,29 @@ final class AgentModel: ObservableObject {
         busy = true
         defer { busy = false }
         do {
+            // Both decisions go through the gate; only the approval is gated by
+            // it. A refused check throws before the transport is reached, so the
+            // ask stays queued.
             if approve {
-                _ = try await VtaMobileAgent.approveStepUp(
-                    approveRequest: pending.rawDoc, transport: transport, vtaDid: trimmedDid,
-                    identity: identity, trustedIssuers: trustedIssuers)
+                _ = try await approvalGate.submit(
+                    approving: true, reason: Self.approveRequestReason
+                ) {
+                    try await VtaMobileAgent.approveStepUp(
+                        approveRequest: pending.rawDoc, transport: transport, vtaDid: trimmedDid,
+                        identity: identity, trustedIssuers: trustedIssuers)
+                }
                 stepUpStatus = "✅ Approved — \(pending.summary)"
                 recordEvent(
                     .approval, "Approved", pending.summary,
                     did: pending.review.relyingParty)
             } else {
-                _ = try await VtaMobileAgent.denyStepUp(
-                    approveRequest: pending.rawDoc, reason: reason, transport: transport,
-                    vtaDid: trimmedDid, identity: identity, trustedIssuers: trustedIssuers)
+                _ = try await approvalGate.submit(
+                    approving: false, reason: Self.approveRequestReason
+                ) {
+                    try await VtaMobileAgent.denyStepUp(
+                        approveRequest: pending.rawDoc, reason: reason, transport: transport,
+                        vtaDid: trimmedDid, identity: identity, trustedIssuers: trustedIssuers)
+                }
                 stepUpStatus = "🚫 Declined — \(pending.summary)"
                 recordEvent(
                     .error, "Declined", pending.summary,
@@ -524,6 +556,11 @@ final class AgentModel: ObservableObject {
             // Clear the (possibly still-visible) notification for this ask.
             UNUserNotificationCenter.current().removeDeliveredNotifications(
                 withIdentifiers: ["pending-approval-\(pending.review.sessionId)"])
+        } catch let error as ApprovalGateError {
+            stepUpStatus = "🚫 \(error.localizedDescription)"
+            recordEvent(
+                .error, "Approval not authorized", pending.summary,
+                did: pending.review.relyingParty)
         } catch {
             stepUpStatus =
                 "❌ \(approve ? "Approve" : "Decline") failed — \(error.localizedDescription)"
@@ -596,9 +633,10 @@ final class AgentModel: ObservableObject {
     }
 
     /// Resolve a queued task-consent (by `payloadDigest`, else the front one).
-    /// Approve signs the decision (Face ID fires as the enclave key signs) and
-    /// posts it; Deny sends a signed refusal the VTA records. A fresh token is
-    /// fetched — the ask may have sat.
+    /// Approve asks the device owner to confirm — Face ID, Touch ID or the
+    /// passcode, through ``ApprovalGate`` — and then signs the decision and
+    /// posts it; Deny sends a signed refusal the VTA records, with no check. A
+    /// refused or cancelled confirmation leaves the task queued.
     func resolveConsent(
         payloadDigest: String? = nil, approve: Bool, reason: String = "Declined by the operator"
     ) async {
@@ -611,17 +649,25 @@ final class AgentModel: ObservableObject {
         defer { busy = false }
         do {
             if approve {
-                let outcome = try await VtaMobileAgent.approveTaskConsent(
-                    request: pending.rawDoc, transport: transport, vtaDid: trimmedDid,
-                    identity: identity, trustedIssuers: trustedIssuers)
+                let outcome = try await approvalGate.submit(
+                    approving: true, reason: Self.approveTaskReason
+                ) {
+                    try await VtaMobileAgent.approveTaskConsent(
+                        request: pending.rawDoc, transport: transport, vtaDid: trimmedDid,
+                        identity: identity, trustedIssuers: trustedIssuers)
+                }
                 stepUpStatus = "✅ Approved — \(pending.summary) (\(outcome.status))"
                 recordEvent(
                     .approval, "Approved task", pending.summary,
                     did: pending.request.issuer)
             } else {
-                _ = try await VtaMobileAgent.denyTaskConsent(
-                    request: pending.rawDoc, reason: reason, transport: transport,
-                    vtaDid: trimmedDid, identity: identity, trustedIssuers: trustedIssuers)
+                _ = try await approvalGate.submit(
+                    approving: false, reason: Self.approveTaskReason
+                ) {
+                    try await VtaMobileAgent.denyTaskConsent(
+                        request: pending.rawDoc, reason: reason, transport: transport,
+                        vtaDid: trimmedDid, identity: identity, trustedIssuers: trustedIssuers)
+                }
                 stepUpStatus = "🚫 Declined — \(pending.summary)"
                 recordEvent(
                     .error, "Declined task", pending.summary,
@@ -630,6 +676,12 @@ final class AgentModel: ObservableObject {
             pendingConsents.removeAll { $0.request.payloadDigest == pending.request.payloadDigest }
             UNUserNotificationCenter.current().removeDeliveredNotifications(
                 withIdentifiers: ["pending-consent-\(pending.request.payloadDigest)"])
+        } catch let error as ApprovalGateError {
+            // The task stays queued: nothing was signed and nothing was sent.
+            stepUpStatus = "🚫 \(error.localizedDescription)"
+            recordEvent(
+                .error, "Approval not authorized", pending.summary,
+                did: pending.request.issuer)
         } catch {
             stepUpStatus =
                 "❌ \(approve ? "Approve" : "Decline") failed — \(error.localizedDescription)"

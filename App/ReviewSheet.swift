@@ -2,8 +2,9 @@ import SwiftUI
 import VtaMobileAgent
 
 /// The consent gate: shows *what* an incoming step-up authorizes (and *who* is
-/// asking) and lets the operator **Approve** (Face ID fires as the enclave key
-/// signs) or **Deny with a reason** (a holder-signed refusal the VTA audits).
+/// asking) and lets the operator **Approve** (the device owner confirms with
+/// Face ID, Touch ID or the passcode, then the holder key signs) or **Deny with
+/// a reason** (a holder-signed refusal the VTA audits, sent without a check).
 /// Presented for the front of `AgentModel.pendingApprovals`.
 struct ReviewSheet: View {
     let pending: PendingApproval
@@ -53,8 +54,9 @@ struct ReviewSheet: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                     Text(
-                        "Only you can authorize this. Approve signs with your device key; "
-                            + "Deny sends a signed refusal."
+                        "Only you can authorize this. Approve asks for Face ID or your "
+                            + "passcode, then signs with your device key; Deny sends a signed "
+                            + "refusal."
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
