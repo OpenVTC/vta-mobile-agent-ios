@@ -508,9 +508,11 @@ final class AgentModel: ObservableObject {
     }
 
     /// Resolve a specific queued ask (by session), or the front one if `sessionId`
-    /// isn't found (e.g. a notification action with no target). Approve signs
-    /// (Face ID fires as the enclave key signs); Deny sends a holder-signed
-    /// refusal the VTA audits. A fresh token is fetched — the ask may have sat.
+    /// isn't found (e.g. a notification action with no target). Approve asks the
+    /// device owner to confirm — Face ID, Touch ID or the passcode, through
+    /// ``ApprovalGate`` — and only then signs with the holder key; Deny sends a
+    /// holder-signed refusal the VTA audits, with no check. A refused or
+    /// cancelled confirmation leaves the ask queued.
     func resolveApproval(
         sessionId: String? = nil, approve: Bool, reason: String = "Declined by the operator"
     ) async {
@@ -631,9 +633,10 @@ final class AgentModel: ObservableObject {
     }
 
     /// Resolve a queued task-consent (by `payloadDigest`, else the front one).
-    /// Approve signs the decision (Face ID fires as the enclave key signs) and
-    /// posts it; Deny sends a signed refusal the VTA records. A fresh token is
-    /// fetched — the ask may have sat.
+    /// Approve asks the device owner to confirm — Face ID, Touch ID or the
+    /// passcode, through ``ApprovalGate`` — and then signs the decision and
+    /// posts it; Deny sends a signed refusal the VTA records, with no check. A
+    /// refused or cancelled confirmation leaves the task queued.
     func resolveConsent(
         payloadDigest: String? = nil, approve: Bool, reason: String = "Declined by the operator"
     ) async {
