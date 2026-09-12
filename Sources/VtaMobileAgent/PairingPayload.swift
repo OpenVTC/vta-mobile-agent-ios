@@ -4,10 +4,13 @@ import Foundation
 /// the console/CLI) to bind this phone to their VTA + tenant in one scan —
 /// instead of hand-typing the VTA DID / mediator DID in Settings.
 ///
-/// Wire form: a compact `cierge-pair://v1?…` URL (also accepts a raw JSON object
-/// for flexibility). The pairing conveys *where* to connect; registering this
-/// device as the operator's delegated approver is a follow-up VTA call once
-/// connected (that half needs a live VTA).
+/// Wire form: a compact `cierge-pair://v1?…` URL. The pairing conveys *where* to
+/// connect; registering this device as the operator's delegated approver is a
+/// follow-up VTA call once connected (that half needs a live VTA).
+///
+/// The code is unsigned, so nothing in it is trusted as-is: ``PairingPolicy``
+/// checks it against the VTA's DID document and the operator confirms it before
+/// anything is saved.
 ///
 /// **What "where to connect" means now.** The agent reaches its VTA only over the
 /// mediator (see ``VtaTransport``), so the DID pair — `did` + `mediator` — is the
@@ -19,9 +22,9 @@ public struct PairingPayload: Codable, Equatable {
     public let vtaDID: String
     /// The mediator DID to reach that VTA over.
     ///
-    /// Optional on the wire, but the agent needs one to connect at all: a payload
-    /// without it pairs the VTA DID and leaves the operator to fill the mediator
-    /// in Settings.
+    /// Optional, and only a cross-check: the mediator the agent uses always comes
+    /// from the VTA's DID document, and a code naming a different one is
+    /// refused (see ``PairingPolicy``).
     public let mediatorDID: String?
     /// The push-gateway base URL (optional). Still a URL: the gateway is the one
     /// service not reached over the mediator.
@@ -62,21 +65,14 @@ public struct PairingPayload: Codable, Equatable {
         return comps.url?.absoluteString ?? ""
     }
 
-    /// Parse a scanned string: the `cierge-pair://` URL form, or a raw JSON
-    /// object. Returns `nil` if it isn't a well-formed pairing payload (so a
-    /// stray QR is ignored rather than mis-applied).
+    /// Parse a scanned string in the `cierge-pair://` URL form. Returns `nil` for
+    /// anything else, so a stray QR is ignored rather than mis-applied. A parsed
+    /// payload is unauthenticated input: it goes through ``PairingPolicy`` and
+    /// the operator's confirmation before any of it is used.
     public static func parse(_ scanned: String) -> PairingPayload? {
         let trimmed = scanned.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.hasPrefix("\(scheme)://") {
-            return parseURL(trimmed)
-        }
-        // Raw JSON fallback.
-        if let data = trimmed.data(using: .utf8),
-            let p = try? JSONDecoder().decode(PairingPayload.self, from: data)
-        {
-            return p.vtaDID.isEmpty ? nil : p
-        }
-        return nil
+        guard trimmed.hasPrefix("\(scheme)://") else { return nil }
+        return parseURL(trimmed)
     }
 
     private static func parseURL(_ url: String) -> PairingPayload? {

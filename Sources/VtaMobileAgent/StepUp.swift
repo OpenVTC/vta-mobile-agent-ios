@@ -107,11 +107,10 @@ extension VtaMobileAgent {
         return DenyOutcome(sessionId: request.sessionId, reason: reason)
     }
 
-    /// Whether an incoming step-up should be **shown to the operator for consent**
-    /// rather than auto-ratified. A step-up that carries a structured
-    /// authorization context (a Cierge share / spend / tool ask) always prompts —
-    /// the human must see *what* they authorize. A plain login-elevation step-up
-    /// (no context) may be auto-approved for a frictionless sign-in.
+    /// Whether an incoming step-up carries a structured authorization context (a
+    /// Cierge share / spend / tool ask). Such a step-up always prompts — the
+    /// human must see *what* they authorize. Whether a plain sign-in step-up may
+    /// be ratified without asking is decided by ``StepUpPolicy``.
     public static func requiresReview(_ review: StepUpReview) -> Bool {
         review.authorizationContext != nil
     }
@@ -150,5 +149,17 @@ extension VtaMobileAgent {
             node = next
         }
         return node[path.last ?? ""] as? String
+    }
+}
+
+extension StepUpPolicy {
+    /// ``decide(hasAuthorizationContext:appActive:autoApproveSignIns:)`` for a
+    /// verified review.
+    public static func decide(
+        review: VtaMobileAgent.StepUpReview, appActive: Bool, autoApproveSignIns: Bool
+    ) -> StepUpDecision {
+        decide(
+            hasAuthorizationContext: VtaMobileAgent.requiresReview(review),
+            appActive: appActive, autoApproveSignIns: autoApproveSignIns)
     }
 }

@@ -84,35 +84,3 @@ extension VtaMobileAgent {
     /// `created`, which the VTA rejects if future-dated).
     static func rfc3339Now() -> String { ISO8601DateFormatter().string(from: Date()) }
 }
-
-/// Minimal HTTP poster for the **push gateway** — the one service still
-/// addressed by URL. Deliberately not a general VTA client: the VTA is reached
-/// over ``VtaTransport`` and nothing else.
-struct GatewayClient {
-    private let base: String
-
-    init(baseURL: URL) {
-        var s = baseURL.absoluteString
-        while s.hasSuffix("/") { s.removeLast() }
-        self.base = s
-    }
-
-    /// POST a document to `path` and return the response body, or throw on non-2xx.
-    func post(path: String, body: String) async throws -> String {
-        guard let url = URL(string: base + path) else {
-            throw AgentError.badResponse("invalid gateway URL: \(base + path)")
-        }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = Data(body.utf8)
-
-        let (data, response) = try await URLSession.shared.data(for: req)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        let text = String(decoding: data, as: UTF8.self)
-        guard (200..<300).contains(status) else {
-            throw AgentError.http(status: status, body: text)
-        }
-        return text
-    }
-}

@@ -31,6 +31,13 @@ final class AgentModel: ObservableObject {
     /// Push gateway base URL (HTTPS) — where `push/register` is POSTed.
     @Published var gatewayUrl = ""
 
+    /// A pairing waiting for the operator's confirmation (drives
+    /// `PairingConfirmSheet`). The configuration above does not change until
+    /// it is confirmed.
+    @Published var pendingPairing: PairingReview?
+    /// Why the last attempt to stage or confirm a pairing did not go ahead.
+    @Published var pairingError: String?
+
     // Connection state. `isAuthenticated` now means "the VTA answered over the
     // inbox" — there is no token to hold, so a successful `whoami` is the proof.
     @Published var isAuthenticated = false
@@ -62,6 +69,13 @@ final class AgentModel: ObservableObject {
     /// Takes effect on the next (re)connect of the listener.
     @Published var useTsp = false {
         didSet { UserDefaults.standard.set(useTsp, forKey: "pnm.useTsp") }
+    }
+
+    /// Ratify plain sign-in step-ups (no authorization context) without asking,
+    /// and only while the app is in the foreground — see `StepUpPolicy`.
+    /// Default off: every step-up is queued for the operator.
+    @Published var autoApproveSignIns = false {
+        didSet { UserDefaults.standard.set(autoApproveSignIns, forKey: "pnm.autoApproveSignIns") }
     }
 
     // Test-tab scratch.
@@ -124,10 +138,15 @@ final class AgentModel: ObservableObject {
     /// The allowlist for the currently configured VTA.
     private var trustedIssuers: [String] { Self.trustedIssuers(vtaDid: trimmedDid) }
 
-    init() {
+    /// Confirms the device owner before a pairing replaces a different VTA.
+    private let ownerAuthenticator: DeviceOwnerAuthenticator
+
+    init(ownerAuthenticator: DeviceOwnerAuthenticator = LocalDeviceOwnerAuthenticator()) {
+        self.ownerAuthenticator = ownerAuthenticator
         autoConnectEnabled = (UserDefaults.standard.object(forKey: "pnm.autoConnect") as? Bool) ?? true
         pushEnabled = UserDefaults.standard.bool(forKey: "pnm.pushEnabled")
         useTsp = UserDefaults.standard.bool(forKey: "pnm.useTsp")
+        autoApproveSignIns = UserDefaults.standard.bool(forKey: "pnm.autoApproveSignIns")
     }
 
     // MARK: Derived presentation state
@@ -188,21 +207,92 @@ final class AgentModel: ObservableObject {
         Task { await connect(auto: true) }
     }
 
-    /// Apply a scanned pairing payload: fill the connection config and connect.
-    /// Registering this device as the operator's delegated approver is a
-    /// follow-up once connected (needs a live VTA).
-    func applyPairing(_ p: PairingPayload) {
-        // `p.vtaURL` is deliberately ignored: the agent no longer speaks REST. The
-        // field is optional and only still parsed so codes minted for older
-        // clients scan (see `PairingPayload`).
-        vtaDid = p.vtaDID
-        if let m = p.mediatorDID { mediatorDid = m }
-        if let g = p.gatewayURL { gatewayUrl = g }
+    // MARK: Pairing (stage → confirm)
+
+    /// Check a scanned or typed pairing and put it up for confirmation: resolve
+    /// the VTA's DID document for its mediator, run ``PairingPolicy``, and set
+    /// `pendingPairing` for the confirmation sheet. Saves nothing and does not
+    /// connect. The decision itself lives in the package (`PairingPolicy`,
+    /// tested there); this only fetches its inputs and publishes the result.
+    ///
+    /// `p.vtaURL` is deliberately ignored: the agent no longer speaks REST.
+    func stagePairing(_ p: PairingPayload) async {
+        let did = p.vtaDID.trimmed
+        guard did.hasPrefix("did:") else {
+            pairingError = PairingRejection.invalidVtaDID.localizedDescription
+            return
+        }
+        guard !busy else { return }
+        busy = true
+        defer { busy = false }
+        pendingPairing = nil
+        pairingError = nil
+
+        let resolvedMediator: String?
+        do {
+            resolvedMediator = try await resolveVtaEndpoints(did: did).mediatorDid
+        } catch {
+            pairingError = "Couldn't resolve \(did): \(error.localizedDescription)"
+            return
+        }
+        switch PairingPolicy.review(
+            p, resolvedMediator: resolvedMediator, currentVtaDID: trimmedDid)
+        {
+        case .success(let review):
+            pendingPairing = review
+        case .failure(let rejection):
+            pairingError = rejection.localizedDescription
+            recordEvent(.error, "Pairing refused", rejection.localizedDescription, did: did)
+        }
+    }
+
+    /// Apply a pairing the operator confirmed. Replacing a *different* VTA
+    /// first requires device-owner authentication. Then the old connection is
+    /// torn down, anything queued from the old VTA is discarded, push wake is
+    /// turned off (its gateway registration belonged to the old pairing), and
+    /// the new configuration is saved and connected.
+    func confirmPairing(_ review: PairingReview) async {
+        guard pendingPairing == review, !busy else { return }
+        if review.replacesDifferentVta {
+            busy = true
+            let authenticated = await ownerAuthenticator.authenticate(
+                reason: "Replace the VTA this phone approves for")
+            busy = false
+            guard authenticated else {
+                pendingPairing = nil
+                pairingError =
+                    "Pairing not changed: device owner authentication failed or was cancelled."
+                recordEvent(.error, "Re-pair not authorized", nil, did: review.vtaDID)
+                return
+            }
+        }
+        // The sheet may have been dismissed while authenticating.
+        guard pendingPairing == review else { return }
+        pendingPairing = nil
+        pairingError = nil
+
+        await tearDownConnection()
+        pendingApprovals.removeAll()
+        pendingConsents.removeAll()
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+        pushEnabled = false
+        pushStatus = nil
+
+        vtaDid = review.vtaDID
+        mediatorDid = review.mediatorDID
+        gatewayUrl = review.gatewayURL?.absoluteString ?? ""
         persistConnection()
         recordEvent(
-            .info, "Paired via QR", p.tenant.map { "tenant · \($0)" }, did: p.vtaDID)
+            .info, review.replacesDifferentVta ? "Re-paired" : "Paired",
+            review.tenant.map { "tenant · \($0)" }, did: review.vtaDID)
         status = "Paired — connecting…"
-        Task { await connect() }
+        autoConnectEnabled = true
+        await connect()
+    }
+
+    /// The operator declined the pairing on the sheet. Nothing was changed.
+    func cancelPairing() {
+        pendingPairing = nil
     }
 
     // MARK: Connect / disconnect (auto + recoverable)
@@ -264,12 +354,18 @@ final class AgentModel: ObservableObject {
     /// until the next manual Connect.
     func disconnect() async {
         autoConnectEnabled = false
+        await tearDownConnection()
+        status = "Disconnected. Tap Connect to bring the agent back online."
+        recordEvent(.info, "Disconnected", nil)
+    }
+
+    /// Cancel any pending reconnect and close the inbox, leaving auto-connect
+    /// and the history alone. Shared by `disconnect` and `confirmPairing`.
+    private func tearDownConnection() async {
         reconnectTask?.cancel(); reconnectTask = nil
         await stopListening()
         isAuthenticated = false
         whoamiSummary = nil
-        status = "Disconnected. Tap Connect to bring the agent back online."
-        recordEvent(.info, "Disconnected", nil)
     }
 
     /// Background backoff retry after a failed/lost connection.
@@ -293,36 +389,6 @@ final class AgentModel: ObservableObject {
     // is gone with REST. Intrinsic-sender auth has no token to hold, so there is
     // no expiry to race and nothing to refresh — the holder key is the
     // credential on every single message.
-
-    // MARK: VTA discovery
-
-    /// Resolve the VTA's DID and fill the mediator DID from its DID document, so
-    /// the operator enters only the DID. The document's `restBaseUrl` is ignored
-    /// — the agent has no REST path to use it on.
-    func resolveFromDid() async {
-        let did = trimmedDid
-        guard !did.isEmpty else {
-            status = "Enter the VTA DID first."
-            return
-        }
-        busy = true
-        defer { busy = false }
-        status = "Resolving endpoints from \(did)…"
-        do {
-            let ep = try await resolveVtaEndpoints(did: did)
-            if let med = ep.mediatorDid, !med.isEmpty {
-                mediatorDid = med
-                status = "✅ Filled mediator from the DID."
-                persistConnection()
-            } else {
-                status =
-                    "Resolved the DID, but it advertises no #vta-didcomm service — "
-                    + "enter the mediator DID manually."
-            }
-        } catch {
-            status = "❌ Couldn't resolve \(did) — \(error.localizedDescription)"
-        }
-    }
 
     // MARK: Session introspection
 
@@ -381,18 +447,23 @@ final class AgentModel: ObservableObject {
 
     // MARK: Human-in-the-loop review gate
 
-    /// Route an incoming step-up: an AI ask carrying a structured authorization
-    /// context is surfaced for the operator's consent; a plain login-elevation
-    /// step-up (no context) is auto-ratified.
+    /// Route an incoming step-up through `StepUpPolicy`. A plain sign-in (no
+    /// authorization context) is ratified straight away only while the app is
+    /// active and "Auto-approve sign-ins" is on. Everything else — an ask
+    /// carrying an authorization context, or anything arriving on a background
+    /// wake — is queued for the operator's Approve/Deny with a notification.
     private func handleIncomingStepUp(
-        doc: String, transport: VtaTransport, did: String, identity: HolderIdentity
+        doc: String, transport: VtaTransport, did: String, identity: HolderIdentity,
+        appActive: Bool
     ) async {
         do {
             // `inspect` verifies the request's proof against the enrolled
             // allowlist before returning anything showable.
             let review = try await VtaMobileAgent.inspect(
                 approveRequest: doc, trustedIssuers: Self.trustedIssuers(vtaDid: did))
-            if VtaMobileAgent.requiresReview(review) {
+            let decision = StepUpPolicy.decide(
+                review: review, appActive: appActive, autoApproveSignIns: autoApproveSignIns)
+            if decision == .queueForReview {
                 // Queue it (dedupe by session so a re-drain doesn't double-add).
                 if !pendingApprovals.contains(where: { $0.review.sessionId == review.sessionId }) {
                     pendingApprovals.append(PendingApproval(rawDoc: doc, review: review))
@@ -661,7 +732,8 @@ final class AgentModel: ObservableObject {
                             switch inbound {
                             case .stepUp(let doc):
                                 await handleIncomingStepUp(
-                                    doc: doc, transport: transport, did: did, identity: identity)
+                                    doc: doc, transport: transport, did: did, identity: identity,
+                                    appActive: UIApplication.shared.applicationState == .active)
                             case .taskConsent(let doc):
                                 await handleIncomingTaskConsent(doc: doc, did: did)
                             }
@@ -687,7 +759,8 @@ final class AgentModel: ObservableObject {
                             switch inbound {
                             case .stepUp(let doc):
                                 await handleIncomingStepUp(
-                                    doc: doc, transport: transport, did: did, identity: identity)
+                                    doc: doc, transport: transport, did: did, identity: identity,
+                                    appActive: UIApplication.shared.applicationState == .active)
                             case .taskConsent(let doc):
                                 await handleIncomingTaskConsent(doc: doc, did: did)
                             }
@@ -766,15 +839,28 @@ final class AgentModel: ObservableObject {
     /// to the gateway, then `device/set-wake` to the VTA.
     func onApnsToken(_ hex: String) async {
         apnsToken = hex
-        print("[vta-agent] APNs device token: \(hex)")
         guard let identity, let transport, !trimmedDid.isEmpty else {
             pushStatus = "Got APNs token — connect to a VTA first, then enable push."
             return
         }
-        let gw = gatewayUrl.trimmed
-        guard let gatewayURL = URL(string: gw), gatewayURL.scheme != nil else {
+        guard !gatewayUrl.trimmed.isEmpty else {
             pushStatus = "Set the push gateway URL in Settings before enabling push."
             return
+        }
+        // Use-time check: the same hard rules as when the URL was saved, in case
+        // it predates them. The domain binding is only a warning, already shown
+        // when the URL was saved, so here it is logged rather than enforced.
+        let gatewayURL: URL
+        switch GatewayURLPolicy.validateStructure(gatewayUrl) {
+        case .success(let url):
+            gatewayURL = url
+        case .failure(let refusal):
+            pushStatus = "❌ Push gateway URL refused — \(refusal.localizedDescription)"
+            recordEvent(.error, "Push gateway URL refused", refusal.localizedDescription)
+            return
+        }
+        if let warning = GatewayURLPolicy.bindingWarning(for: gatewayURL, vtaDID: trimmedDid) {
+            log("Push gateway: \(warning.localizedDescription)")
         }
         let mediator = mediatorDid.trimmed
         do {
@@ -806,7 +892,8 @@ final class AgentModel: ObservableObject {
     }
 
     /// A contentless wake arrived (background push). Re-establish what we need and
-    /// drain any queued approve-requests, ratifying each with the holder key.
+    /// drain any queued requests into the review queue, notifying for each —
+    /// nothing is approved in the background.
     func handlePushWake() async -> Bool {
         guard let cfg = Self.loadConnection() else {
             pushStatus = "Push received, but no saved VTA connection — open the app and connect."
@@ -840,13 +927,14 @@ final class AgentModel: ObservableObject {
                         session: session, timeoutSecs: 5)
                 else { break }
                 handledAny = true
-                // Same gate as the live listener: surface the ask for consent
-                // (posting the actionable notification — ideal for a background
-                // wake); a plain login step-up auto-ratifies.
+                // Same policy as the live listener, with the app not active:
+                // every step-up is queued and posts the actionable
+                // notification. A background wake never approves on its own.
                 switch inbound {
                 case .stepUp(let doc):
                     await handleIncomingStepUp(
-                        doc: doc, transport: wakeTransport, did: cfg.vtaDid, identity: id)
+                        doc: doc, transport: wakeTransport, did: cfg.vtaDid, identity: id,
+                        appActive: false)
                 case .taskConsent(let doc):
                     await handleIncomingTaskConsent(doc: doc, did: cfg.vtaDid)
                 }
@@ -890,10 +978,6 @@ final class AgentModel: ObservableObject {
         d.set(mediatorDid.trimmed, forKey: "pnm.mediatorDid")
         d.set(gatewayUrl.trimmed, forKey: "pnm.gatewayUrl")
     }
-
-    /// Persist the current config without requiring a connection (so edits in
-    /// Settings survive even before the first successful auth).
-    func saveConfig() { persistConnection() }
 
     static func loadConnection() -> ConnectionConfig? {
         let d = UserDefaults.standard

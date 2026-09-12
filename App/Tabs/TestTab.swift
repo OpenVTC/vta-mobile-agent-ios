@@ -62,7 +62,8 @@ struct TestTab: View {
         Card(tint: .teal) {
             CardHeader(title: "Live approver", systemImage: "dot.radiowaves.left.and.right", tint: .teal)
             Text(model.listening
-                ? "Listening on the mediator. Incoming approve-requests are ratified automatically."
+                ? "Listening on the mediator. Incoming approve-requests are queued for your review "
+                    + "(sign-ins auto-approve only if that's turned on in Settings)."
                 : "Listen on the mediator and approve step-ups relayed from other devices, live.")
                 .font(.caption).foregroundStyle(.secondary)
             Button {
@@ -142,11 +143,16 @@ struct TestTab: View {
             if let push = model.pushStatus {
                 Text(push).font(.footnote).padding(.top, 2)
             }
-            if let token = model.apnsToken {
-                Text("APNs token (for test-wake-apns):")
-                    .font(.caption2).foregroundStyle(.secondary).padding(.top, 4)
-                MonoCopyRow(value: token, lineLimit: 3)
-            }
+            // Debug builds only, and only a prefix: enough to tell which
+            // registration is live without putting the token on screen.
+            #if DEBUG
+                if let token = model.apnsToken {
+                    Text("APNs token: \(String(token.prefix(8)))…")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 4)
+                }
+            #endif
         }
     }
 }
