@@ -51,13 +51,20 @@ no `authenticate` step and no token to refresh. **Possession of the holder key i
 the credential**, and it is presented on every document:
 
 - **Every request is signed.** Each Trust Task the device sends carries an
-  `eddsa-jcs-2022` Data Integrity proof by the holder key under
-  `proofPurpose: authentication`, names the device's `did:key` as `issuer` and
-  the VTA as `recipient`, and carries a fresh `id` and `issuedAt`. The VTA
+  `eddsa-jcs-2022` Data Integrity proof by the holder key, names the device's
+  `did:key` as `issuer` and the VTA as `recipient`, and carries a fresh `id`
+  and `issuedAt`. The proof is made under `proofPurpose: authentication`, with
+  one exception: the step-up `approve-response` is the approver's own answer,
+  evidence the VTA records, so it is signed under `assertionMethod`. The VTA
   accepts a document over DIDComm or TSP only when that proof verifies as its
   `issuer` and the issuer is the transport sender (authcrypt for DIDComm, the
   sealed sender VID for TSP); the transport sender alone authorizes nothing.
   The engine refuses to send a document that is not signed that way.
+- **Every pushed approval request is verified before it prompts.** The step-up
+  approve-request, consent request and task-consent request the VTA pushes are
+  its operational messages: each must carry a proof by an enrolled VTA or
+  executor, made with a key that DID lists under `authentication`, under
+  `proofPurpose: authentication`. Anything else is refused and never shown.
 - **Every reply is verified before it is read.** A reply must carry a proof by
   the VTA, made with a key the VTA lists under `authentication`, under
   `proofPurpose: authentication`; be issued by the VTA to this device; and be

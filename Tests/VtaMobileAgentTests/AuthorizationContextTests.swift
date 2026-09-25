@@ -10,7 +10,8 @@ import VtaMobileCore
 /// `authorizationContext`, and `AuthorizationContext.decode` turns it into the
 /// typed model the card renders.
 ///
-/// The fixtures are **signed**: `eddsa-jcs-2022` proofs minted by
+/// The fixtures are **signed**: `eddsa-jcs-2022` proofs under
+/// `proofPurpose: authentication`, as the VTA signs what it pushes, minted by
 /// vta-mobile-core's deterministic test executor key (`proof::test_support`,
 /// seed 17), whose `did:key` issuer resolves offline — so the tests exercise
 /// the full on-device verification path without touching the network. The
@@ -23,12 +24,12 @@ final class AuthorizationContextTests: XCTestCase {
     /// A share ask carried under the reverse-DNS `payload.ext` key, signed by
     /// the fixture issuer.
     private let shareRequest = #"""
-        {"id":"urn:uuid:x","issuer":"did:key:z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S","payload":{"challenge":"VHJhbnNmZXJDb25maXJtTm9uY2VYWQ","ext":{"org.openvtc.authorization-context":{"action":{"capabilities":[],"fields":["salaryBand"],"from":"finance","kind":"share","purpose":"book flights within policy","to":"travel","ttlSeconds":3600},"detail":"book flights within policy","domain":"finance","risk":"high","summary":"finance wants to share salaryBand with travel","tenant":"acme","type":"https://openvtc.org/cierge/authorization-context/0.1"}},"reason":"finance wants to share salaryBand with travel","sessionId":"sess-1","subject":"did:webvh:operator","targetAcr":"aal2"},"proof":{"created":"2026-07-29T08:23:48Z","cryptosuite":"eddsa-jcs-2022","proofPurpose":"assertionMethod","proofValue":"zy4Xvrxydfv2UX5udwCUMEmCoP5MfA4VGY8LW1amgJSsNX93TMQ5dKCMMByooSmpHa5UPVzib6e1KHYjT3B4wmeQ","type":"DataIntegrityProof","verificationMethod":"did:key:z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S#z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S"},"type":"https://trusttasks.org/spec/auth/step-up/approve-request/0.1"}
+        {"id":"urn:uuid:x","issuer":"did:key:z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S","payload":{"challenge":"VHJhbnNmZXJDb25maXJtTm9uY2VYWQ","ext":{"org.openvtc.authorization-context":{"action":{"capabilities":[],"fields":["salaryBand"],"from":"finance","kind":"share","purpose":"book flights within policy","to":"travel","ttlSeconds":3600},"detail":"book flights within policy","domain":"finance","risk":"high","summary":"finance wants to share salaryBand with travel","tenant":"acme","type":"https://openvtc.org/cierge/authorization-context/0.1"}},"reason":"finance wants to share salaryBand with travel","sessionId":"sess-1","subject":"did:webvh:operator","targetAcr":"aal2"},"proof":{"created":"2026-09-25T20:25:01Z","cryptosuite":"eddsa-jcs-2022","proofPurpose":"authentication","proofValue":"z784c44BsmqGdFLHpAnutBYBKwcfcm9rBvS56adD1NF2jdE7USQiAnfyc41EkMJZAoVndwrzw5nACNamdTNFeYLK","type":"DataIntegrityProof","verificationMethod":"did:key:z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S#z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S"},"type":"https://trusttasks.org/spec/auth/step-up/approve-request/0.1"}
         """#
 
     /// A plain login-elevation step-up (no ext), signed by the fixture issuer.
     private let plainRequest = #"""
-        {"id":"urn:uuid:y","issuer":"did:key:z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S","payload":{"challenge":"VHJhbnNmZXJDb25maXJtTm9uY2VYWQ","reason":"Approve sign-in","sessionId":"s1","subject":"did:key:zAlice"},"proof":{"created":"2026-07-29T08:23:48Z","cryptosuite":"eddsa-jcs-2022","proofPurpose":"assertionMethod","proofValue":"z2Z5iDnaLHGJtKHCQP8SJXSjvV3QFEVB6nCUs1F8tFQ9AQiMyYb3HCZqkGpzQyt5YcDuSDJZ3JJqamYdbPekWNejV","type":"DataIntegrityProof","verificationMethod":"did:key:z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S#z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S"},"type":"https://trusttasks.org/spec/auth/step-up/approve-request/0.1"}
+        {"id":"urn:uuid:y","issuer":"did:key:z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S","payload":{"challenge":"VHJhbnNmZXJDb25maXJtTm9uY2VYWQ","reason":"Approve sign-in","sessionId":"s1","subject":"did:key:zAlice"},"proof":{"created":"2026-09-25T20:25:01Z","cryptosuite":"eddsa-jcs-2022","proofPurpose":"authentication","proofValue":"z5XwPypcJfyBGAmFyM6f2ZHc5XsegQDc2mmJCM4ppwQFqqZEE15z5jNu4Q6jz1nFzK6bEZaBo65gPpgEUnY4mv2e","type":"DataIntegrityProof","verificationMethod":"did:key:z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S#z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S"},"type":"https://trusttasks.org/spec/auth/step-up/approve-request/0.1"}
         """#
 
     private var enrolled: [String] { [fixtureIssuer] }
