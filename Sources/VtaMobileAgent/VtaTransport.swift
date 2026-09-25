@@ -12,9 +12,11 @@ import VtaMobileCore
 /// anything on its own.** The VTA accepts a document over DIDComm or TSP only
 /// when its Data Integrity proof verifies as its `issuer` and that issuer is the
 /// transport sender (authcrypt for DIDComm, the sealed sender VID for TSP). So
-/// every document submitted is holder-signed under `authentication`, names this
-/// device as `issuer` and the VTA as `recipient`, and carries a fresh `id` and
-/// `issuedAt`; the engine refuses to send one that does not. There is no
+/// every document submitted is holder-signed (under `authentication`, except
+/// the step-up `approve-response`, the approver's own answer, which is signed
+/// under `assertionMethod`), names this device as `issuer` and the VTA as
+/// `recipient`, and carries a fresh `id` and `issuedAt`; the engine refuses to
+/// send one that does not. There is no
 /// challenge/authenticate round trip and nothing to refresh: possession of the
 /// holder key **is** the credential.
 ///
