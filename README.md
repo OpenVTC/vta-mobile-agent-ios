@@ -54,8 +54,10 @@ the credential**, and it is presented on every document:
   `eddsa-jcs-2022` Data Integrity proof by the holder key, names the device's
   `did:key` as `issuer` and the VTA as `recipient`, and carries a fresh `id`
   and `issuedAt`. The proof is made under `proofPurpose: authentication`, with
-  one exception: the step-up `approve-response` is the approver's own answer,
-  evidence the VTA records, so it is signed under `assertionMethod`. The VTA
+  one exception: the approver's own decisions (the step-up `approve-response`
+  and the `task-consent/decision`) are evidence the executor records, so they
+  are signed under `assertionMethod`, with a key the device's `did:key` lists
+  there. The VTA
   accepts a document over DIDComm or TSP only when that proof verifies as its
   `issuer` and the issuer is the transport sender (authcrypt for DIDComm, the
   sealed sender VID for TSP); the transport sender alone authorizes nothing.
