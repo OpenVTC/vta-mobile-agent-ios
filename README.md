@@ -47,11 +47,26 @@ simulator, and press ⌘U.
 ## Transport (no VTA REST)
 
 The agent reaches its VTA over the holder's mediator and nothing else. There is
-no `authenticate` step and no token to refresh: the VTA proves the sender
-cryptographically on every message — authcrypt for DIDComm, the sealed sender
-VID for TSP — and derives the caller's role, contexts and session from that DID
-alone (*intrinsic-sender auth*). **Possession of the holder key is the
-credential.**
+no `authenticate` step and no token to refresh. **Possession of the holder key is
+the credential**, and it is presented on every document:
+
+- **Every request is signed.** Each Trust Task the device sends carries an
+  `eddsa-jcs-2022` Data Integrity proof by the holder key under
+  `proofPurpose: authentication`, names the device's `did:key` as `issuer` and
+  the VTA as `recipient`, and carries a fresh `id` and `issuedAt`. The VTA
+  accepts a document over DIDComm or TSP only when that proof verifies as its
+  `issuer` and the issuer is the transport sender (authcrypt for DIDComm, the
+  sealed sender VID for TSP); the transport sender alone authorizes nothing.
+  The engine refuses to send a document that is not signed that way.
+- **Every reply is verified before it is read.** A reply must carry a proof by
+  the VTA, made with a key the VTA lists under `authentication`, under
+  `proofPurpose: authentication`; be issued by the VTA to this device; and be
+  threaded to the request's `id` with a `type` answering it. Error replies are
+  held to the same rule. Anything else is `FfiError.UnverifiedReply` and is
+  discarded unread. Over DIDComm the engine checks this inside `sendTrustTask`;
+  over TSP the `TspReplyRouter` checks it before resolving the waiting
+  `submit`, so a forged frame echoing a `threadId` cannot take the genuine
+  reply's place.
 
 Everything the device submits (`auth/step-up/approve-response`,
 `task-consent/decision`, `device/set-wake`, `whoami`) goes through
@@ -69,6 +84,11 @@ socket lock for its whole budget — so a submit that read its own reply would
 deadlock the inbox loop. Instead the listen loop stays the sole reader and
 offers every frame to the router first. The correlation rule is the framework's:
 a response carries `threadId = request.threadId ?? request.id`.
+
+On TSP the inbox also announces the device's reachability to the VTA with a
+holder-signed `messaging/ping/0.1` (`VtaMobileAgent.announceTsp`), sent once on
+connect and again every 150 s. It used to be unsigned; the VTA now refuses that
+like any other unsigned document.
 
 **What still isn't DIDComm.** Two things deliberately remain over HTTP:
 
