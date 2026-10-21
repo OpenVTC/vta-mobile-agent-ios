@@ -24,7 +24,7 @@ struct PairingConfirmSheet: View {
                     section("VTA") {
                         DidLabel(did: review.vtaDID, caption: "the VTA this phone will approve for")
                         MonoCopyRow(value: review.vtaDID, lineLimit: 4)
-                        field("Domain", review.vtaDomain ?? "none (not a did:web or did:webvh)")
+                        field("Domain", review.vtaDomain ?? "none (not a did:web, did:webvh, or did:scid with ?src=)")
                         if review.vtaDID.hasPrefix("did:web:") {
                             warning(
                                 "A did:web identity is only as trustworthy as its domain's DNS and TLS.")

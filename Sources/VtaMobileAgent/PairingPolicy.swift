@@ -23,7 +23,8 @@ public struct PairingReview: Identifiable, Equatable {
 
     public var id: String { vtaDID }
 
-    /// The `did:web` / `did:webvh` domain of the VTA, for display.
+    /// The `did:web` / `did:webvh` domain of the VTA, or a `did:scid`'s `src`
+    /// host, for display.
     public var vtaDomain: String? { GatewayURLPolicy.webDomain(ofDID: vtaDID) }
 
     /// Whether confirming would replace a *different* VTA. That changes whose
@@ -31,7 +32,8 @@ public struct PairingReview: Identifiable, Equatable {
     /// and a destructive-change warning.
     public var replacesDifferentVta: Bool {
         guard let replacingVtaDID else { return false }
-        return replacingVtaDID != vtaDID
+        // One did:scid VTA given with and without its `?src=` is the same VTA.
+        return !DidIdentity.same(replacingVtaDID, vtaDID)
     }
 }
 

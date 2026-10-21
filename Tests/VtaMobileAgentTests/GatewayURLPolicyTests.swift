@@ -215,4 +215,45 @@ final class GatewayURLPolicyTests: XCTestCase {
         XCTAssertNil(GatewayURLPolicy.webDomain(ofDID: "did:key:z6Mk"))
         XCTAssertNil(GatewayURLPolicy.webDomain(ofDID: "not a did"))
     }
+
+    func testWebDomainOfDidScidIsItsSrcHost() {
+        XCTAssertEqual(
+            GatewayURLPolicy.webDomain(ofDID: "did:scid:vh:1:QmSCID?src=WebVH.example.org/glenn-vta"),
+            "webvh.example.org")
+        XCTAssertEqual(
+            GatewayURLPolicy.webDomain(ofDID: "did:scid:vh:1:QmSCID?src=vta.example.com%3A8443/a#key-1"),
+            "vta.example.com")
+        XCTAssertEqual(
+            GatewayURLPolicy.webDomain(ofDID: "did:scid:vh:1:QmSCID?src=https://vta.example.com/"),
+            "vta.example.com")
+        XCTAssertNil(GatewayURLPolicy.webDomain(ofDID: "did:scid:vh:1:QmSCID"))
+        XCTAssertNil(GatewayURLPolicy.webDomain(ofDID: "did:scid:vh:1:QmSCID?src=a.example&x=1"))
+        XCTAssertNil(GatewayURLPolicy.webDomain(ofDID: "did:scid:ke:1:QmSCID?src=a.example"))
+    }
+
+    func testDidScidBindsToItsSrcHost() {
+        let vta = "did:scid:vh:1:QmSCID?src=vta.example.com/glenn"
+        XCTAssertEqual(
+            GatewayURLPolicy.validate("https://push.example.com", vtaDID: vta),
+            .success(URL(string: "https://push.example.com")!))
+        XCTAssertEqual(
+            GatewayURLPolicy.validate("https://gw.example.net", vtaDID: vta),
+            .failure(.hostNotBoundToVta("gw.example.net")))
+    }
+
+    func testABareDidScidFailsClosed() {
+        // A did:scid always resolves through a host; given without ?src= there
+        // is nothing to bind the gateway to, so it is warned about, not passed.
+        XCTAssertEqual(
+            GatewayURLPolicy.validate("https://gw.example.net", vtaDID: "did:scid:vh:1:QmSCID"),
+            .failure(.hostNotBoundToVta("gw.example.net")))
+    }
+
+    func testDidIdentityIgnoresOnlyADidScidSrc() {
+        XCTAssertEqual(DidIdentity.of("did:scid:vh:1:Qm?src=a.example#key-1"), "did:scid:vh:1:Qm#key-1")
+        XCTAssertTrue(DidIdentity.same("did:scid:vh:1:Qm?src=a.example", "did:scid:vh:1:Qm"))
+        XCTAssertFalse(DidIdentity.same("did:scid:vh:1:Qm", "did:webvh:Qm:a.example"))
+        XCTAssertEqual(DidIdentity.of("did:scid:vh:1:Qm?versionId=2"), "did:scid:vh:1:Qm?versionId=2")
+        XCTAssertEqual(DidIdentity.of("did:webvh:Qm:a.example?x=1"), "did:webvh:Qm:a.example?x=1")
+    }
 }

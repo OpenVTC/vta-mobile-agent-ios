@@ -89,7 +89,7 @@ struct SettingsTab: View {
                 + "its mediator and push gateway before anything changes.")
                 .font(.caption).foregroundStyle(.secondary)
 
-            ThemedField(title: "VTA DID", prompt: "did:webvh:… / did:web:…",
+            ThemedField(title: "VTA DID", prompt: "did:webvh:… / did:scid:vh:1:…?src=… / did:web:…",
                 text: $draftVtaDid, mono: true)
             DidNameNote(did: draftVtaDid)
 
