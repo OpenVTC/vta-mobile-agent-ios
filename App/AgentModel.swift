@@ -9,9 +9,11 @@ import VtaMobileCore
 /// messaging approver loop on the `VtaMobileAgent` façade.
 ///
 /// **No REST, no tokens.** The agent reaches its VTA only over the mediator —
-/// DIDComm or TSP. The VTA proves the sender cryptographically on every message
-/// and derives authorization from that DID (intrinsic-sender auth), so there is
-/// no challenge/authenticate exchange, no bearer token and nothing to refresh.
+/// DIDComm or TSP. Every document the device sends carries its holder-signed
+/// proof, which the VTA binds to the transport sender before deriving
+/// authorization from that DID, and every reply is verified as the VTA's before
+/// it is read. So there is no challenge/authenticate exchange, no bearer token
+/// and nothing to refresh.
 /// "Connected" therefore means *the inbox is open and the VTA answered a
 /// `whoami` over it*.
 ///
@@ -762,14 +764,18 @@ final class AgentModel: ObservableObject {
                         // inbox sends nothing else, so this announce is the only
                         // signal — best-effort, and re-announced below to stay inside
                         // the VTA's reachability TTL.
-                        try? await session.announce(vtaDid: did, mediatorDid: mediator)
+                        try? await VtaMobileAgent.announceTsp(
+                            session: session, vtaDid: did, mediatorDid: mediator,
+                            identity: identity)
                         var lastAnnounce = Date()
                         while !Task.isCancelled {
                             // Re-announce well within the VTA's ~300s reachability
                             // TTL so a long-lived inbox doesn't silently decay back to
                             // DIDComm. Checked each loop turn (≤ the 30s recv poll).
                             if Date().timeIntervalSince(lastAnnounce) >= 150 {
-                                try? await session.announce(vtaDid: did, mediatorDid: mediator)
+                                try? await VtaMobileAgent.announceTsp(
+                                    session: session, vtaDid: did, mediatorDid: mediator,
+                                    identity: identity)
                                 lastAnnounce = Date()
                             }
                             // `router:` is essential now that we also *send* over

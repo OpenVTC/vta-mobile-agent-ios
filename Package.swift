@@ -10,12 +10,13 @@ import PackageDescription
 // VtaMobileCore.xcframework.zip.sha256). The Swift wrapper and the binary are a
 // matched set — never mix versions.
 // TODO(release): the vendored Sources/VtaMobileCore/VtaMobileCore.swift is
-// generated from the *unreleased* core carrying on-device proof verification
-// (verifiable-trust-infrastructure#871, post-v0.6.16). Until the next
-// `vta-mobile-core-v*` release is cut and this pin bumped to it, a fresh
-// checkout must use the local-xcframework override below (build it with
-// `vta-mobile-core/scripts/package-ios.sh`) — the v0.6.16 binary no longer
-// matches the vendored bindings.
+// generated from the *unreleased* core that signs every request under
+// `authentication` and verifies every reply (verifiable-trust-infrastructure#1744,
+// after v0.6.17). Until the next
+// `vta-mobile-core-v*` release is cut and this pin and checksum are bumped to it,
+// a fresh checkout must use the local-xcframework override below (build it with
+// `vta-mobile-core/scripts/package-ios.sh`) — the v0.6.17 binary does not match
+// the vendored bindings.
 let engineTag = "vta-mobile-core-v0.6.17"
 let engineChecksum = "d8e417d06797ce27bf47d54f0e946aabd7cd4198f3d613481cbfe3fdc484258b"
 
