@@ -20,7 +20,9 @@ public enum GatewayURLError: Error, Equatable {
     /// A single-label host or a name under a local-only suffix.
     case localName
     /// Structurally acceptable, but the host is not under the paired VTA's
-    /// `did:web` / `did:webvh` domain. Advisory: surface it, don't hide it.
+    /// `did:web` / `did:webvh` domain (or a `did:scid`'s `src` host), or the
+    /// VTA is a `did:scid` that names no host. Advisory: surface it, don't
+    /// hide it.
     case hostNotBoundToVta(String)
 
     /// Only the domain-binding result is a warning; every other case refuses
@@ -101,23 +103,33 @@ public enum GatewayURLPolicy {
         }
     }
 
-    /// `.hostNotBoundToVta` when `vtaDID` is a `did:web` / `did:webvh` and the
-    /// URL's host is neither under that domain nor under its parent; `nil` when
-    /// bound, or when the DID names no web domain to bind to (e.g. `did:key`).
+    /// `.hostNotBoundToVta` when `vtaDID` is a `did:web` / `did:webvh` (or a
+    /// `did:scid` with `?src=`) and the URL's host is neither under that domain
+    /// nor under its parent; `nil` when bound, or when the DID's method names no
+    /// web domain at all (e.g. `did:key`). A `did:scid` always resolves through
+    /// a host, so one given without its `?src=` is warned about rather than
+    /// passed: there is no host to check the gateway against.
     public static func bindingWarning(for url: URL, vtaDID: String?) -> GatewayURLError? {
-        guard let vtaDID, let domain = webDomain(ofDID: vtaDID),
-            let host = url.host?.lowercased(), !host.isEmpty
-        else { return nil }
+        guard let vtaDID, let host = url.host?.lowercased(), !host.isEmpty else { return nil }
+        guard let domain = webDomain(ofDID: vtaDID) else {
+            let trimmed = vtaDID.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.hasPrefix("did:scid:") ? .hostNotBoundToVta(host) : nil
+        }
         let base = bindingBase(for: domain)
         if host == base || host.hasSuffix("." + base) { return nil }
         return .hostNotBoundToVta(host)
     }
 
-    /// The web domain a `did:web` / `did:webvh` resolves against — lowercased,
-    /// with any `%3A` port and path segments dropped — or `nil` for any other
-    /// DID method.
+    /// The web domain a `did:web` / `did:webvh` resolves against, or the host
+    /// of a `did:scid:vh:1`'s `?src=` — lowercased, with any port and path
+    /// segments dropped — or `nil` for any other DID method and for a
+    /// `did:scid` without `?src=`.
     public static func webDomain(ofDID did: String) -> String? {
-        let parts = did.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = did.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("did:scid:") {
+            return scidSourceHost(trimmed)
+        }
+        let parts = trimmed
             .split(separator: ":", omittingEmptySubsequences: false)
         guard parts.count >= 3, parts[0] == "did" else { return nil }
         let segment: Substring
@@ -132,6 +144,23 @@ public enum GatewayURLPolicy {
             return nil
         }
         guard let decoded = String(segment).removingPercentEncoding,
+            var host = decoded.split(separator: ":", maxSplits: 1).first.map(String.init)
+        else { return nil }
+        host = host.lowercased()
+        if host.hasSuffix(".") { host.removeLast() }
+        return host.isEmpty ? nil : host
+    }
+
+    /// The host of a `did:scid:vh:1:<scid>?src=<host>[/<path>]` locator.
+    static func scidSourceHost(_ did: String) -> String? {
+        guard did.hasPrefix("did:scid:vh:1:"), var src = DidIdentity.scidSource(did) else {
+            return nil
+        }
+        for scheme in ["https://", "http://"] where src.hasPrefix(scheme) {
+            src.removeFirst(scheme.count)
+        }
+        guard let first = src.split(separator: "/", omittingEmptySubsequences: false).first,
+            let decoded = String(first).removingPercentEncoding,
             var host = decoded.split(separator: ":", maxSplits: 1).first.map(String.init)
         else { return nil }
         host = host.lowercased()

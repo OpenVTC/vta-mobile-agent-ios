@@ -139,4 +139,22 @@ final class PairingPolicyTests: XCTestCase {
             PairingPolicy.review(
                 payload, resolvedMediator: "did:web:attacker-mediator", currentVtaDID: nil))
     }
+
+    /// A did:scid VTA given with and without its `?src=` is one VTA: re-pairing
+    /// it is not replacing it. Its domain is the `src` host.
+    func testADidScidVtaWithAndWithoutItsSrcIsTheSameVta() throws {
+        let qr = "cierge-pair://v1?did=did:scid:vh:1:QmScid%3Fsrc%3Dvta.example.com/glenn"
+            + "&mediator=did:web:mediator.example.com&gateway=https://push.example.com/"
+        let payload = try XCTUnwrap(PairingPayload.parse(qr))
+        let review = try PairingPolicy.review(
+            payload, resolvedMediator: "did:web:mediator.example.com",
+            currentVtaDID: "did:scid:vh:1:QmScid"
+        ).get()
+
+        XCTAssertEqual(review.vtaDID, "did:scid:vh:1:QmScid?src=vta.example.com/glenn")
+        XCTAssertFalse(review.replacesDifferentVta)
+        XCTAssertEqual(review.vtaDomain, "vta.example.com")
+        XCTAssertNil(review.gatewayWarning)
+    }
+
 }
