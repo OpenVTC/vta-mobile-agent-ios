@@ -3903,7 +3903,7 @@ public func FfiConverterTypeFfiError_lower(_ value: FfiError) -> RustBuffer {
 
 
 /**
- * The `vta/pcs/*` task a document is for.
+ * The `vta/pcs/<task>` task a document is for.
  */
 
 public enum PcsTask: Equatable, Hashable {
@@ -4540,7 +4540,7 @@ public func FfiConverterTypeWitnessReply_lower(_ value: WitnessReply) -> RustBuf
 
 
 /**
- * The `vta/witness/*` task a document is for.
+ * The `vta/witness/<task>` task a document is for.
  */
 
 public enum WitnessTask: Equatable, Hashable {
@@ -5352,7 +5352,7 @@ public func signChallenge(signer: Signer, challengeB64url: String)throws  -> Dat
 })
 }
 /**
- * Build a holder-signed `vta/pcs/*` request to the holder's VTA.
+ * Build a holder-signed `vta/pcs/<task>` request to the holder's VTA.
  *
  * `payload_json` is the task's payload; it is checked against the task's generated type
  * before anything is signed, so an `InvalidInput` here names the schema violation.
@@ -5369,7 +5369,7 @@ public func buildPcsTask(env: AuthEnvelope, task: PcsTask, payloadJson: String, 
 })
 }
 /**
- * Check a `vta/pcs/*#response` against the task's generated response type and return its
+ * Check a `vta/pcs/<task>#response` against the task's generated response type and return its
  * payload as JSON. A `trust-task-error` answer is not a response and fails here with `Decode`;
  * the native layer reads its `payload.code` (`vta/pcs/prove:noUsableAttestation`, …) itself.
  */
@@ -5804,7 +5804,7 @@ public func parseStepUpRequest(json: String, trustedIssuers: [String])async thro
         )
 }
 /**
- * Build a holder-signed `vta/witness/*` request to the holder's VTA.
+ * Build a holder-signed `vta/witness/<task>` request to the holder's VTA.
  *
  * `payload_json` is the task's payload, checked against the task's generated type before
  * anything is signed. For [`WitnessTask::Present`] and [`WitnessTask::Accept`] it is
@@ -5869,7 +5869,7 @@ public func classifyWitnessReply(requestJson: String, replyJson: String, witness
         )
 }
 /**
- * Check a `vta/witness/*#response` against the task's generated response type and return its
+ * Check a `vta/witness/<task>#response` against the task's generated response type and return its
  * payload as JSON. A `trust-task-error` from the VTA (`sessionUnknown`, `responseInvalid`,
  * `vwcInvalid`, …) is not a response and fails here with `Decode`; the native layer reads its
  * `payload.code` itself, as for every other VTA task.
