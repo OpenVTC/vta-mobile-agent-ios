@@ -977,6 +977,36 @@ public static func connect(holderDid: String, holderSigningPrivateEd25519: Data,
         )
 }
     
+    /**
+     * Connect to `mediator_did` as a holder that is **not** a `did:key`, with its secrets
+     * given one per verification method — a `did:peer:2` relationship DID, whose signing
+     * key `V` and key-agreement key `E` are independent, so [`connect`](Self::connect)'s
+     * one seed cannot express them. This is the session a wallet carries witness documents
+     * on ([`crate::witness`]): its holder is the relationship DID, its peer the witness.
+     *
+     * - `holder_did`: the holder DID.
+     * - `secrets`: its private keys, each under the verification-method id it is
+     * published as. Checked against the resolved document before any socket opens
+     * ([`crate::holder_secrets`]): every one must be the key published at its id, and
+     * there must be an Ed25519 `authentication` key and an X25519 `keyAgreement` key.
+     * - `peer_did`: the peer this session converses with — a VTA, or a witness.
+     * - `mediator_did`: the mediator to connect through.
+     */
+public static func connectWithSecrets(holderDid: String, secrets: [HolderSecret], peerDid: String, mediatorDid: String)async throws  -> MediatorSession  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_constructor_mediatorsession_connect_with_secrets(FfiConverterString.lower(holderDid),FfiConverterSequenceTypeHolderSecret.lower(secrets),FfiConverterString.lower(peerDid),FfiConverterString.lower(mediatorDid)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_u64,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_u64,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_u64,
+            liftFunc: FfiConverterTypeMediatorSession_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
 
     
     /**
@@ -1280,6 +1310,29 @@ public static func connect(holderDid: String, holderSigningPrivateEd25519: Data,
         )
 }
     
+    /**
+     * Connect the TSP websocket as a holder that is **not** a `did:key`, with its secrets
+     * given one per verification method — the TSP counterpart to
+     * [`MediatorSession::connect_with_secrets`](crate::mediator::MediatorSession::connect_with_secrets),
+     * for a `did:peer:2` relationship DID carrying witness documents ([`crate::witness`]).
+     * The secrets are checked against the resolved document before any socket opens
+     * ([`crate::holder_secrets`]).
+     */
+public static func connectWithSecrets(holderDid: String, secrets: [HolderSecret], mediatorDid: String)async throws  -> TspMediatorSession  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_constructor_tspmediatorsession_connect_with_secrets(FfiConverterString.lower(holderDid),FfiConverterSequenceTypeHolderSecret.lower(secrets),FfiConverterString.lower(mediatorDid)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_u64,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_u64,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_u64,
+            liftFunc: FfiConverterTypeTspMediatorSession_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
 
     
     /**
@@ -1521,6 +1574,11 @@ public struct ApproveResponseDraft: Equatable, Hashable {
      * Echoed verbatim from the request.
      */
     public var subject: String
+    /**
+     * Echoed verbatim from the request; empty when the request carried none
+     * (a bound approval may have no session), in which case the response
+     * carries none either.
+     */
     public var sessionId: String
     /**
      * The step-up challenge; the gate signs/binds over it.
@@ -1548,7 +1606,12 @@ public struct ApproveResponseDraft: Equatable, Hashable {
          */issuedAt: String, 
         /**
          * Echoed verbatim from the request.
-         */subject: String, sessionId: String, 
+         */subject: String, 
+        /**
+         * Echoed verbatim from the request; empty when the request carried none
+         * (a bound approval may have no session), in which case the response
+         * carries none either.
+         */sessionId: String, 
         /**
          * The step-up challenge; the gate signs/binds over it.
          */challenge: String, 
@@ -2219,6 +2282,82 @@ public func FfiConverterTypeHolderKeys_lower(_ value: HolderKeys) -> RustBuffer 
 
 
 /**
+ * One private key of the holder, under the verification-method id it is published as.
+ *
+ * The shape of `vta_sdk::did_secrets::SecretEntry`, without the key type: the multicodec
+ * prefix of `private_key_multibase` is authoritative for it.
+ */
+public struct HolderSecret: Equatable, Hashable {
+    /**
+     * The verification method this key is published as — an absolute DID URL under the
+     * holder, e.g. `did:peer:2.Vz…#key-1`.
+     */
+    public var keyId: String
+    /**
+     * The private key, multibase (base58btc) with its multicodec prefix: `0x1300` Ed25519,
+     * `0x1302` X25519.
+     */
+    public var privateKeyMultibase: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The verification method this key is published as — an absolute DID URL under the
+         * holder, e.g. `did:peer:2.Vz…#key-1`.
+         */keyId: String, 
+        /**
+         * The private key, multibase (base58btc) with its multicodec prefix: `0x1300` Ed25519,
+         * `0x1302` X25519.
+         */privateKeyMultibase: String) {
+        self.keyId = keyId
+        self.privateKeyMultibase = privateKeyMultibase
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension HolderSecret: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHolderSecret: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HolderSecret {
+        return
+            try HolderSecret(
+                keyId: FfiConverterString.read(from: &buf), 
+                privateKeyMultibase: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HolderSecret, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.keyId, into: &buf)
+        FfiConverterString.write(value.privateKeyMultibase, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHolderSecret_lift(_ buf: RustBuffer) throws -> HolderSecret {
+    return try FfiConverterTypeHolderSecret.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHolderSecret_lower(_ value: HolderSecret) -> RustBuffer {
+    return FfiConverterTypeHolderSecret.lower(value)
+}
+
+
+/**
  * A resolved peer's public key-agreement key — e.g. from [`crate::resolver`].
  * Needed to authcrypt *to* the peer and to verify the peer's authcrypt.
  */
@@ -2562,7 +2701,10 @@ public struct StepUpRequest: Equatable, Hashable {
      */
     public var subject: String
     /**
-     * Opaque session id; echoed back verbatim in the response.
+     * Opaque session id; echoed back verbatim in the response. Empty when the
+     * request names no session (0.5 makes `sessionId` optional: a step-up
+     * bound to one operation elevates none) — the same convention
+     * [`crate::stepup`]'s response draft reads, where empty means absent.
      */
     public var sessionId: String
     /**
@@ -2578,11 +2720,12 @@ public struct StepUpRequest: Equatable, Hashable {
      */
     public var targetAcr: String?
     /**
-     * Evidence gates the relying party will accept (`"did-signed"` /
-     * `"webauthn"`). Empty when the request did not constrain it (any
-     * supported kind is allowed). The `0.2` wire spelling `didSigned` is
-     * normalised to `did-signed`, so the native layer switches on one set of
-     * strings regardless of the request version.
+     * Evidence gates the relying party will accept, from the request's
+     * required `accepts`: `"did-signed"`, `"webauthn"`, or
+     * `"approver-signed"`. The wire's camelCase is normalised to the kebab
+     * form the native layers switch on; a kind they do not implement
+     * (`approver-signed`) is surfaced rather than dropped, so the UI can say
+     * it cannot answer instead of offering a gate the request did not list.
      */
     public var acceptableEvidence: [String]
     /**
@@ -2611,7 +2754,10 @@ public struct StepUpRequest: Equatable, Hashable {
          * The VID whose session is being elevated.
          */subject: String, 
         /**
-         * Opaque session id; echoed back verbatim in the response.
+         * Opaque session id; echoed back verbatim in the response. Empty when the
+         * request names no session (0.5 makes `sessionId` optional: a step-up
+         * bound to one operation elevates none) — the same convention
+         * [`crate::stepup`]'s response draft reads, where empty means absent.
          */sessionId: String, 
         /**
          * base64url challenge the response must bind.
@@ -2623,11 +2769,12 @@ public struct StepUpRequest: Equatable, Hashable {
          * The acr the relying party wants (e.g. `"aal2"`), if specified.
          */targetAcr: String?, 
         /**
-         * Evidence gates the relying party will accept (`"did-signed"` /
-         * `"webauthn"`). Empty when the request did not constrain it (any
-         * supported kind is allowed). The `0.2` wire spelling `didSigned` is
-         * normalised to `did-signed`, so the native layer switches on one set of
-         * strings regardless of the request version.
+         * Evidence gates the relying party will accept, from the request's
+         * required `accepts`: `"did-signed"`, `"webauthn"`, or
+         * `"approver-signed"`. The wire's camelCase is normalised to the kebab
+         * form the native layers switch on; a kind they do not implement
+         * (`approver-signed`) is surfaced rather than dropped, so the UI can say
+         * it cannot answer instead of offering a gate the request did not list.
          */acceptableEvidence: [String], 
         /**
          * Whether the request carried WebAuthn options — i.e. the relying party
@@ -3428,6 +3575,82 @@ public func FfiConverterTypeWebAuthnAssertion_lower(_ value: WebAuthnAssertion) 
 
 
 /**
+ * How to reach a witness from a relationship DID: the highest-preference transport both DID
+ * documents advertise (TSP, then DIDComm), matched on service `type`.
+ */
+public struct WitnessRoute: Equatable, Hashable {
+    public var transport: WitnessTransport
+    /**
+     * The mediator the relationship DID's session connects through.
+     */
+    public var relationshipMediatorDid: String
+    /**
+     * The witness's mediator: the `mediator_did` for
+     * [`TspMediatorSession::send_trust_task`](crate::tsp::TspMediatorSession::send_trust_task).
+     */
+    public var witnessMediatorDid: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(transport: WitnessTransport, 
+        /**
+         * The mediator the relationship DID's session connects through.
+         */relationshipMediatorDid: String, 
+        /**
+         * The witness's mediator: the `mediator_did` for
+         * [`TspMediatorSession::send_trust_task`](crate::tsp::TspMediatorSession::send_trust_task).
+         */witnessMediatorDid: String) {
+        self.transport = transport
+        self.relationshipMediatorDid = relationshipMediatorDid
+        self.witnessMediatorDid = witnessMediatorDid
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension WitnessRoute: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWitnessRoute: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WitnessRoute {
+        return
+            try WitnessRoute(
+                transport: FfiConverterTypeWitnessTransport.read(from: &buf), 
+                relationshipMediatorDid: FfiConverterString.read(from: &buf), 
+                witnessMediatorDid: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WitnessRoute, into buf: inout [UInt8]) {
+        FfiConverterTypeWitnessTransport.write(value.transport, into: &buf)
+        FfiConverterString.write(value.relationshipMediatorDid, into: &buf)
+        FfiConverterString.write(value.witnessMediatorDid, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessRoute_lift(_ buf: RustBuffer) throws -> WitnessRoute {
+    return try FfiConverterTypeWitnessRoute.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessRoute_lower(_ value: WitnessRoute) -> RustBuffer {
+    return FfiConverterTypeWitnessRoute.lower(value)
+}
+
+
+/**
  * Which APNs environment issued the token — the gateway routes to the matching
  * Apple endpoint.
  */
@@ -3680,6 +3903,194 @@ public func FfiConverterTypeFfiError_lower(_ value: FfiError) -> RustBuffer {
 
 
 /**
+ * The `vta/pcs/*` task a document is for.
+ */
+
+public enum PcsTask: Equatable, Hashable {
+    
+    case applicationsCreate
+    case applicationsShow
+    case applicationsDelete
+    case verifyAttestation
+    case prove
+    case rootRequest
+    case rootAccept
+    case tokensRequest
+    case tokensAccept
+    case tokensAbandon
+    case attest
+    case vetterShow
+    case voterRegister
+    case voterAccept
+    case vote
+    case voterReceipt
+    case voterRead
+    case voteEncrypted
+    case vetterRecover
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PcsTask: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePcsTask: FfiConverterRustBuffer {
+    typealias SwiftType = PcsTask
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PcsTask {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .applicationsCreate
+        
+        case 2: return .applicationsShow
+        
+        case 3: return .applicationsDelete
+        
+        case 4: return .verifyAttestation
+        
+        case 5: return .prove
+        
+        case 6: return .rootRequest
+        
+        case 7: return .rootAccept
+        
+        case 8: return .tokensRequest
+        
+        case 9: return .tokensAccept
+        
+        case 10: return .tokensAbandon
+        
+        case 11: return .attest
+        
+        case 12: return .vetterShow
+        
+        case 13: return .voterRegister
+        
+        case 14: return .voterAccept
+        
+        case 15: return .vote
+        
+        case 16: return .voterReceipt
+        
+        case 17: return .voterRead
+        
+        case 18: return .voteEncrypted
+        
+        case 19: return .vetterRecover
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PcsTask, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .applicationsCreate:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .applicationsShow:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .applicationsDelete:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .verifyAttestation:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .prove:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .rootRequest:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .rootAccept:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .tokensRequest:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .tokensAccept:
+            writeInt(&buf, Int32(9))
+        
+        
+        case .tokensAbandon:
+            writeInt(&buf, Int32(10))
+        
+        
+        case .attest:
+            writeInt(&buf, Int32(11))
+        
+        
+        case .vetterShow:
+            writeInt(&buf, Int32(12))
+        
+        
+        case .voterRegister:
+            writeInt(&buf, Int32(13))
+        
+        
+        case .voterAccept:
+            writeInt(&buf, Int32(14))
+        
+        
+        case .vote:
+            writeInt(&buf, Int32(15))
+        
+        
+        case .voterReceipt:
+            writeInt(&buf, Int32(16))
+        
+        
+        case .voterRead:
+            writeInt(&buf, Int32(17))
+        
+        
+        case .voteEncrypted:
+            writeInt(&buf, Int32(18))
+        
+        
+        case .vetterRecover:
+            writeInt(&buf, Int32(19))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePcsTask_lift(_ buf: RustBuffer) throws -> PcsTask {
+    return try FfiConverterTypePcsTask.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePcsTask_lower(_ value: PcsTask) -> RustBuffer {
+    return FfiConverterTypePcsTask.lower(value)
+}
+
+
+
+/**
  * The platform discriminator, for the advisory `pushPlatform` hint on
  * `device/set-wake` (the VTA never sees the token).
  */
@@ -3854,6 +4265,441 @@ public func FfiConverterTypePushRegistration_lift(_ buf: RustBuffer) throws -> P
 #endif
 public func FfiConverterTypePushRegistration_lower(_ value: PushRegistration) -> RustBuffer {
     return FfiConverterTypePushRegistration.lower(value)
+}
+
+
+
+/**
+ * The document of the session the wallet is about to carry to the witness.
+ */
+
+public enum WitnessDocument: Equatable, Hashable {
+    
+    /**
+     * `witness/session/0.2`, from [`WitnessTask::Open`].
+     */
+    case session
+    /**
+     * `witness/session/submit/0.2`, from [`WitnessTask::Present`].
+     */
+    case submit
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WitnessDocument: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWitnessDocument: FfiConverterRustBuffer {
+    typealias SwiftType = WitnessDocument
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WitnessDocument {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .session
+        
+        case 2: return .submit
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WitnessDocument, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .session:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .submit:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessDocument_lift(_ buf: RustBuffer) throws -> WitnessDocument {
+    return try FfiConverterTypeWitnessDocument.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessDocument_lower(_ value: WitnessDocument) -> RustBuffer {
+    return FfiConverterTypeWitnessDocument.lower(value)
+}
+
+
+
+/**
+ * Which declared refusal a witness answered with, so the wallet can say the right thing.
+ */
+
+public enum WitnessRefusal: Equatable, Hashable {
+    
+    /**
+     * `witness/session:refused` — the witness will not witness this exchange (policy,
+     * capacity, or the parties). Not retryable; another witness may.
+     */
+    case sessionRefused
+    /**
+     * `witness/session/submit:challengeMismatch` — the submission is not bound to a live
+     * session of this witness (expired, already spent, or another session's). Open a new
+     * session.
+     */
+    case challengeMismatch
+    /**
+     * `witness/session/submit:presentationInvalid` — the witness did not accept the
+     * presented credentials (a proof, a validity window, or a community it does not serve).
+     */
+    case presentationInvalid
+    /**
+     * Any other code — a standard one (`malformedRequest`, `permissionDenied`, …) or one this
+     * engine does not know. `code` carries it.
+     */
+    case other
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WitnessRefusal: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWitnessRefusal: FfiConverterRustBuffer {
+    typealias SwiftType = WitnessRefusal
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WitnessRefusal {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .sessionRefused
+        
+        case 2: return .challengeMismatch
+        
+        case 3: return .presentationInvalid
+        
+        case 4: return .other
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WitnessRefusal, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .sessionRefused:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .challengeMismatch:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .presentationInvalid:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .other:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessRefusal_lift(_ buf: RustBuffer) throws -> WitnessRefusal {
+    return try FfiConverterTypeWitnessRefusal.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessRefusal_lower(_ value: WitnessRefusal) -> RustBuffer {
+    return FfiConverterTypeWitnessRefusal.lower(value)
+}
+
+
+
+/**
+ * What a witness answered, once the answer is proven to be the witness's.
+ */
+
+public enum WitnessReply: Equatable, Hashable {
+    
+    /**
+     * The witness's `#response`: hand `response_json` back to the VTA, unaltered, as the
+     * `response` of [`WitnessTask::Present`] (after the session) or [`WitnessTask::Accept`]
+     * (after the submission).
+     */
+    case answered(responseJson: String
+    )
+    /**
+     * A `trust-task-error`: the session ends here. Do not hand it to the VTA.
+     */
+    case refused(refusal: WitnessRefusal, 
+        /**
+         * The code as received, e.g. `witness/session:refused`.
+         */code: String, 
+        /**
+         * The witness's message, for logs; never parse it.
+         */message: String?, 
+        /**
+         * Whether the witness says the same document may be sent again.
+         */retryable: Bool
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WitnessReply: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWitnessReply: FfiConverterRustBuffer {
+    typealias SwiftType = WitnessReply
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WitnessReply {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .answered(responseJson: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 2: return .refused(refusal: try FfiConverterTypeWitnessRefusal.read(from: &buf), code: try FfiConverterString.read(from: &buf), message: try FfiConverterOptionString.read(from: &buf), retryable: try FfiConverterBool.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WitnessReply, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .answered(responseJson):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(responseJson, into: &buf)
+            
+        
+        case let .refused(refusal,code,message,retryable):
+            writeInt(&buf, Int32(2))
+            FfiConverterTypeWitnessRefusal.write(refusal, into: &buf)
+            FfiConverterString.write(code, into: &buf)
+            FfiConverterOptionString.write(message, into: &buf)
+            FfiConverterBool.write(retryable, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessReply_lift(_ buf: RustBuffer) throws -> WitnessReply {
+    return try FfiConverterTypeWitnessReply.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessReply_lower(_ value: WitnessReply) -> RustBuffer {
+    return FfiConverterTypeWitnessReply.lower(value)
+}
+
+
+
+/**
+ * The `vta/witness/*` task a document is for.
+ */
+
+public enum WitnessTask: Equatable, Hashable {
+    
+    /**
+     * `vta/witness/open/0.2` — the `witness/session` document to carry.
+     */
+    case `open`
+    /**
+     * `vta/witness/present/0.2` — hand back the session answer; the submit document to carry.
+     */
+    case present
+    /**
+     * `vta/witness/accept/0.2` — hand back the submit answer; the stored VWC.
+     */
+    case accept
+    /**
+     * `vta/witness/list/0.2` — read back the stored VWCs, each with its outcome evidence as
+     * stored: how a wallet that lost `accept`'s answer, or a second device, rebuilds its record.
+     */
+    case list
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WitnessTask: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWitnessTask: FfiConverterRustBuffer {
+    typealias SwiftType = WitnessTask
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WitnessTask {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .`open`
+        
+        case 2: return .present
+        
+        case 3: return .accept
+        
+        case 4: return .list
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WitnessTask, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .`open`:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .present:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .accept:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .list:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessTask_lift(_ buf: RustBuffer) throws -> WitnessTask {
+    return try FfiConverterTypeWitnessTask.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessTask_lower(_ value: WitnessTask) -> RustBuffer {
+    return FfiConverterTypeWitnessTask.lower(value)
+}
+
+
+
+/**
+ * The transport to carry a session's documents on, and where each side is reached.
+ */
+
+public enum WitnessTransport: Equatable, Hashable {
+    
+    case tsp
+    case didcomm
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WitnessTransport: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWitnessTransport: FfiConverterRustBuffer {
+    typealias SwiftType = WitnessTransport
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WitnessTransport {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .tsp
+        
+        case 2: return .didcomm
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WitnessTransport, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .tsp:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .didcomm:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessTransport_lift(_ buf: RustBuffer) throws -> WitnessTransport {
+    return try FfiConverterTypeWitnessTransport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessTransport_lower(_ value: WitnessTransport) -> RustBuffer {
+    return FfiConverterTypeWitnessTransport.lower(value)
 }
 
 
@@ -4204,6 +5050,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeHolderSecret: FfiConverterRustBuffer {
+    typealias SwiftType = [HolderSecret]
+
+    public static func write(_ value: [HolderSecret], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeHolderSecret.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [HolderSecret] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [HolderSecret]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeHolderSecret.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeTaskConsentEffect: FfiConverterRustBuffer {
     typealias SwiftType = [TaskConsentEffect]
 
@@ -4331,7 +5202,7 @@ public func libraryVersion() -> String  {
 })
 }
 /**
- * Build a DID-signed **denial** `task-consent/decision/0.1`, carrying the human
+ * Build a DID-signed **denial** `task-consent/decision/0.2`, carrying the human
  * `reason`, gated by the same proof. A denial is a signed refusal the executor
  * records; nothing executes.
  */
@@ -4346,7 +5217,7 @@ public func buildTaskConsentDecisionDenied(draft: TaskConsentDecisionDraft, reas
 })
 }
 /**
- * Build a DID-signed **approval** `task-consent/decision/0.1`, gated by an
+ * Build a DID-signed **approval** `task-consent/decision/0.2`, gated by an
  * `eddsa-jcs-2022` Data Integrity proof over the document. `signer` is the
  * native enclave key; its private material never enters this crate.
  */
@@ -4477,6 +5348,37 @@ public func signChallenge(signer: Signer, challengeB64url: String)throws  -> Dat
     uniffi_vta_mobile_core_fn_func_sign_challenge(
         FfiConverterCallbackInterfaceSigner_lower(signer),
         FfiConverterString.lower(challengeB64url),uniffiCallStatus
+    )
+})
+}
+/**
+ * Build a holder-signed `vta/pcs/*` request to the holder's VTA.
+ *
+ * `payload_json` is the task's payload; it is checked against the task's generated type
+ * before anything is signed, so an `InvalidInput` here names the schema violation.
+ */
+public func buildPcsTask(env: AuthEnvelope, task: PcsTask, payloadJson: String, signer: Signer)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_build_pcs_task(
+        FfiConverterTypeAuthEnvelope_lower(env),
+        FfiConverterTypePcsTask_lower(task),
+        FfiConverterString.lower(payloadJson),
+        FfiConverterCallbackInterfaceSigner_lower(signer),uniffiCallStatus
+    )
+})
+}
+/**
+ * Check a `vta/pcs/*#response` against the task's generated response type and return its
+ * payload as JSON. A `trust-task-error` answer is not a response and fails here with `Decode`;
+ * the native layer reads its `payload.code` (`vta/pcs/prove:noUsableAttestation`, …) itself.
+ */
+public func parsePcsResponse(task: PcsTask, json: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_parse_pcs_response(
+        FfiConverterTypePcsTask_lower(task),
+        FfiConverterString.lower(json),uniffiCallStatus
     )
 })
 }
@@ -4626,7 +5528,7 @@ public func buildAuthChallenge(env: AuthEnvelope, subject: String?, purpose: Str
 })
 }
 /**
- * Build a signed `auth/authenticate/0.1`. The framework Data Integrity proof —
+ * Build a signed `auth/authenticate/0.3`. The framework Data Integrity proof —
  * signed by the holder via `signer` — IS the authentication; `challenge` and
  * `session_id` are echoed from the challenge response.
  */
@@ -4643,7 +5545,7 @@ public func buildAuthenticate(env: AuthEnvelope, challenge: String, sessionId: S
 })
 }
 /**
- * Build a signed `messaging/ping/0.1` liveness probe to the VTA.
+ * Build a signed `messaging/ping/0.2` liveness probe to the VTA.
  *
  * Over TSP this is how the device announces its reachability: the VTA records
  * the sealed sender of any inbound frame as TSP-reachable (learn-from-inbound)
@@ -4661,7 +5563,7 @@ public func buildMessagingPing(env: AuthEnvelope, signer: Signer)throws  -> Stri
 })
 }
 /**
- * Build an `auth/refresh/0.1` request: exchange a previously-issued refresh
+ * Build an `auth/refresh/0.2` request: exchange a previously-issued refresh
  * token for a new access token. **No proof** — `auth/refresh` is
  * `IS_PROOF_REQUIRED == false`; the opaque refresh token is the credential and
  * is verified server-side. `scope` MAY narrow (never widen) the issued scope;
@@ -4678,7 +5580,7 @@ public func buildRefresh(env: AuthEnvelope, refreshToken: String, scope: [String
 })
 }
 /**
- * Build a signed `auth/revoke-session/0.1` that invalidates **every** session
+ * Build a signed `auth/revoke-session/0.2` that invalidates **every** session
  * the auth service holds for the holder (e.g. "log out everywhere"). `reason`
  * is an optional audit-log rationale. Holder-signed, as
  * [`build_revoke_session`].
@@ -4694,7 +5596,7 @@ public func buildRevokeAllSessions(env: AuthEnvelope, reason: String?, signer: S
 })
 }
 /**
- * Build a signed `auth/revoke-session/0.1` that invalidates one named session.
+ * Build a signed `auth/revoke-session/0.2` that invalidates one named session.
  * `reason` is an optional audit-log rationale (e.g. `"logout"`, `"device-lost"`,
  * `"key-rotation"`). `auth/revoke-session` is `IS_PROOF_REQUIRED == true`, so
  * the holder-signed proof (via `signer`) authorizes the revocation.
@@ -4737,7 +5639,7 @@ public func parseAuthChallengeResponse(json: String)throws  -> AuthChallenge  {
 })
 }
 /**
- * Parse an `auth/authenticate/0.1#response` — the issued tokens + session.
+ * Parse an `auth/authenticate/0.3#response` — the issued tokens + session.
  */
 public func parseAuthenticateResponse(json: String)throws  -> AuthTokens  {
     return try  FfiConverterTypeAuthTokens_lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
@@ -4748,7 +5650,7 @@ public func parseAuthenticateResponse(json: String)throws  -> AuthTokens  {
 })
 }
 /**
- * Parse an `auth/refresh/0.1#response` — the rotated tokens. Unlike
+ * Parse an `auth/refresh/0.2#response` — the rotated tokens. Unlike
  * authenticate, the session snapshot is **optional**: when the response omits
  * it, `acr` is `None` and `amr` is empty (the caller keeps its prior session
  * state). A consumer that doesn't rotate refresh tokens may also omit
@@ -4763,7 +5665,7 @@ public func parseRefreshResponse(json: String)throws  -> AuthTokens  {
 })
 }
 /**
- * Parse an `auth/revoke-session/0.1#response` — the number of sessions
+ * Parse an `auth/revoke-session/0.2#response` — the number of sessions
  * invalidated. Zero is a valid outcome (e.g. the session was already revoked).
  */
 public func parseRevokeSessionResponse(json: String)throws  -> UInt64  {
@@ -4787,7 +5689,7 @@ public func parseWhoamiResponse(json: String)throws  -> SessionInfo  {
 })
 }
 /**
- * Build a DID-signed **denial** `auth/step-up/approve-response/0.2`: decision
+ * Build a DID-signed **denial** `auth/step-up/approve-response/0.7`: decision
  * `denied`, carrying the human `reason`, gated by the same `eddsa-jcs-2022`
  * proof as an approval. A denial is a *signed refusal* — the VTA verifies the
  * gate (so an injection can't forge it), audits `step_up_denied`, and elevates
@@ -4804,7 +5706,7 @@ public func buildApproveResponseDenied(draft: ApproveResponseDraft, reason: Stri
 })
 }
 /**
- * Build a DID-signed `auth/step-up/approve-response/0.2`: decision `approved`,
+ * Build a DID-signed `auth/step-up/approve-response/0.7`: decision `approved`,
  * `evidence.kind = didSigned`, gated by a Data Integrity proof
  * (`eddsa-jcs-2022`) over the document. `signer` is the native enclave key
  * (the holder/subject key) — its private material never enters this crate;
@@ -4820,7 +5722,7 @@ public func buildApproveResponseDidSigned(draft: ApproveResponseDraft, signer: S
 })
 }
 /**
- * Build a passkey-backed `auth/step-up/approve-response/0.2`: decision
+ * Build a passkey-backed `auth/step-up/approve-response/0.7`: decision
  * `approved`, `evidence.kind = webauthn` carrying `assertion`. The assertion is
  * the gate. The document additionally carries the approver's framework proof
  * (via `signer`, whose DID must be `draft.issuer_did`), because the VTA refuses
@@ -4872,8 +5774,8 @@ public func parseConsentRequest(json: String, trustedIssuers: [String], approver
         )
 }
 /**
- * Verify and parse an inbound `auth/step-up/approve-request/0.1` or `/0.2`
- * Trust Task document.
+ * Verify and parse an inbound `auth/step-up/approve-request/0.5` Trust Task
+ * document.
  *
  * `trusted_issuers` is the enrolled-executor allowlist the native layer holds:
  * the enrolled VTA's DID plus any granted executor DIDs. The request's Data
@@ -4898,6 +5800,106 @@ public func parseStepUpRequest(json: String, trustedIssuers: [String])async thro
             completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
             freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeStepUpRequest_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+/**
+ * Build a holder-signed `vta/witness/*` request to the holder's VTA.
+ *
+ * `payload_json` is the task's payload, checked against the task's generated type before
+ * anything is signed. For [`WitnessTask::Present`] and [`WitnessTask::Accept`] it is
+ * `{"sessionId": …, "response": <the witness's answer, as received>}`.
+ */
+public func buildWitnessTask(env: AuthEnvelope, task: WitnessTask, payloadJson: String, signer: Signer)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_build_witness_task(
+        FfiConverterTypeAuthEnvelope_lower(env),
+        FfiConverterTypeWitnessTask_lower(task),
+        FfiConverterString.lower(payloadJson),
+        FfiConverterCallbackInterfaceSigner_lower(signer),uniffiCallStatus
+    )
+})
+}
+/**
+ * Refuse to carry `document_json` unless it is the `kind` document of session `session_id`,
+ * signed and issued by `relationship_did`, and addressed to `witness_did`.
+ *
+ * The VTA builds these documents; this is the wallet's own check that what it is about to
+ * send in the relationship DID's name is what it asked for, to the witness it named
+ * (CONVENTIONS §6: send each document only to its `recipient`). A session document's `id` is
+ * the session id; a submit document is threaded to it.
+ */
+public func checkWitnessDocument(documentJson: String, kind: WitnessDocument, sessionId: String, relationshipDid: String, witnessDid: String)throws   {try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_check_witness_document(
+        FfiConverterString.lower(documentJson),
+        FfiConverterTypeWitnessDocument_lower(kind),
+        FfiConverterString.lower(sessionId),
+        FfiConverterString.lower(relationshipDid),
+        FfiConverterString.lower(witnessDid),uniffiCallStatus
+    )
+}
+}
+/**
+ * Classify the witness's answer to `request_json` (the document the wallet carried), once it
+ * is proven to be `witness_did`'s.
+ *
+ * The answer must pass [`verify_trust_task_reply`](crate::reply::verify_trust_task_reply)
+ * first — a proof by the witness under `authentication`, threaded to the document, addressed
+ * to the relationship DID — or this is [`FfiError::UnverifiedReply`]: discard it unread. A
+ * refusal is held to the same rule as a success, so a forged refusal cannot make the wallet
+ * abandon a session.
+ *
+ * Over DIDComm, [`MediatorSession::send_trust_task`](crate::mediator::MediatorSession) has
+ * already verified the reply; checking again here costs a cached resolution.
+ */
+public func classifyWitnessReply(requestJson: String, replyJson: String, witnessDid: String)async throws  -> WitnessReply  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_func_classify_witness_reply(FfiConverterString.lower(requestJson),FfiConverterString.lower(replyJson),FfiConverterString.lower(witnessDid)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWitnessReply_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+/**
+ * Check a `vta/witness/*#response` against the task's generated response type and return its
+ * payload as JSON. A `trust-task-error` from the VTA (`sessionUnknown`, `responseInvalid`,
+ * `vwcInvalid`, …) is not a response and fails here with `Decode`; the native layer reads its
+ * `payload.code` itself, as for every other VTA task.
+ */
+public func parseWitnessResponse(task: WitnessTask, json: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_parse_witness_response(
+        FfiConverterTypeWitnessTask_lower(task),
+        FfiConverterString.lower(json),uniffiCallStatus
+    )
+})
+}
+/**
+ * Resolve the relationship DID and the witness DID and pick the transport to carry the
+ * session on: the highest-preference one both advertise (TSP, then DIDComm), matched on
+ * service `type`. REST is never a candidate — a witness answers the transport-proven sender,
+ * which an HTTPS POST does not prove. Neither in common is `InvalidInput` naming both sets.
+ */
+public func resolveWitnessRoute(relationshipDid: String, witnessDid: String)async throws  -> WitnessRoute  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_func_resolve_witness_route(FfiConverterString.lower(relationshipDid),FfiConverterString.lower(witnessDid)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWitnessRoute_lift,
             errorHandler: FfiConverterTypeFfiError_lift
         )
 }
@@ -4929,10 +5931,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vta_mobile_core_checksum_func_library_version() != 30414) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vta_mobile_core_checksum_func_build_task_consent_decision_denied() != 46060) {
+    if (uniffi_vta_mobile_core_checksum_func_build_task_consent_decision_denied() != 9590) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vta_mobile_core_checksum_func_build_task_consent_decision_did_signed() != 3329) {
+    if (uniffi_vta_mobile_core_checksum_func_build_task_consent_decision_did_signed() != 64172) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vta_mobile_core_checksum_func_parse_task_consent_request() != 39562) {
@@ -4948,6 +5950,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vta_mobile_core_checksum_func_sign_challenge() != 61046) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vta_mobile_core_checksum_func_build_pcs_task() != 37760) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vta_mobile_core_checksum_func_parse_pcs_response() != 2522) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vta_mobile_core_checksum_func_build_device_set_wake() != 24816) {
@@ -4974,19 +5982,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vta_mobile_core_checksum_func_build_auth_challenge() != 18097) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vta_mobile_core_checksum_func_build_authenticate() != 14399) {
+    if (uniffi_vta_mobile_core_checksum_func_build_authenticate() != 3401) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vta_mobile_core_checksum_func_build_messaging_ping() != 58831) {
+    if (uniffi_vta_mobile_core_checksum_func_build_messaging_ping() != 13328) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vta_mobile_core_checksum_func_build_refresh() != 64023) {
+    if (uniffi_vta_mobile_core_checksum_func_build_refresh() != 5701) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vta_mobile_core_checksum_func_build_revoke_all_sessions() != 22097) {
+    if (uniffi_vta_mobile_core_checksum_func_build_revoke_all_sessions() != 43287) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vta_mobile_core_checksum_func_build_revoke_session() != 30008) {
+    if (uniffi_vta_mobile_core_checksum_func_build_revoke_session() != 35739) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vta_mobile_core_checksum_func_build_whoami() != 49282) {
@@ -4995,31 +6003,46 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vta_mobile_core_checksum_func_parse_auth_challenge_response() != 8900) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vta_mobile_core_checksum_func_parse_authenticate_response() != 47359) {
+    if (uniffi_vta_mobile_core_checksum_func_parse_authenticate_response() != 862) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vta_mobile_core_checksum_func_parse_refresh_response() != 16736) {
+    if (uniffi_vta_mobile_core_checksum_func_parse_refresh_response() != 15753) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vta_mobile_core_checksum_func_parse_revoke_session_response() != 55457) {
+    if (uniffi_vta_mobile_core_checksum_func_parse_revoke_session_response() != 24631) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vta_mobile_core_checksum_func_parse_whoami_response() != 34649) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vta_mobile_core_checksum_func_build_approve_response_denied() != 26530) {
+    if (uniffi_vta_mobile_core_checksum_func_build_approve_response_denied() != 13874) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vta_mobile_core_checksum_func_build_approve_response_did_signed() != 32256) {
+    if (uniffi_vta_mobile_core_checksum_func_build_approve_response_did_signed() != 44761) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vta_mobile_core_checksum_func_build_approve_response_webauthn() != 45086) {
+    if (uniffi_vta_mobile_core_checksum_func_build_approve_response_webauthn() != 56605) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vta_mobile_core_checksum_func_parse_consent_request() != 33002) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vta_mobile_core_checksum_func_parse_step_up_request() != 35656) {
+    if (uniffi_vta_mobile_core_checksum_func_parse_step_up_request() != 23412) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vta_mobile_core_checksum_func_build_witness_task() != 15176) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vta_mobile_core_checksum_func_check_witness_document() != 3907) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vta_mobile_core_checksum_func_classify_witness_reply() != 48533) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vta_mobile_core_checksum_func_parse_witness_response() != 49364) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vta_mobile_core_checksum_func_resolve_witness_route() != 48667) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vta_mobile_core_checksum_method_didcommsession_add_peer() != 26474) {
@@ -5064,7 +6087,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vta_mobile_core_checksum_constructor_mediatorsession_connect() != 7174) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_vta_mobile_core_checksum_constructor_mediatorsession_connect_with_secrets() != 12713) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_vta_mobile_core_checksum_constructor_tspmediatorsession_connect() != 18501) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vta_mobile_core_checksum_constructor_tspmediatorsession_connect_with_secrets() != 27314) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vta_mobile_core_checksum_method_signer_did() != 64224) {
