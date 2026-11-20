@@ -140,7 +140,7 @@ final class TspReplyRouterTests: XCTestCase {
     /// The verifier is given the request as sent and the peer it was sent to.
     func testVerifierSeesTheRequestAndThePeer() async {
         let seen = SeenArgs()
-        let router = router { request, _, signer in await seen.record(request, signer) }
+        let router = makeRouter { request, _, signer in await seen.record(request, signer) }
         await router.expect("urn:uuid:f", request: "{\"id\": \"urn:uuid:f\"}", from: vta)
         _ = await router.deliver(doc(id: "urn:uuid:r", threadId: "urn:uuid:f"))
         let (request, signer) = await seen.values
