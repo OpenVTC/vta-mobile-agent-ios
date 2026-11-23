@@ -8,18 +8,29 @@ import VtaMobileCore
 /// `POST /api/trust-tasks`); they differ only in framing and in how the reply
 /// finds its way back.
 ///
-/// **Neither carries a bearer token.** The VTA proves the sender
-/// cryptographically — authcrypt for DIDComm, the sealed sender VID for TSP —
-/// and derives the caller's role, contexts and session from that DID alone
-/// (*intrinsic-sender auth*). There is no challenge/authenticate round trip and
-/// nothing to refresh: possession of the holder key **is** the credential. That
-/// is what lets the agent run against a VTA with no REST API at all.
+/// **Neither carries a bearer token, and neither transport authorizes
+/// anything on its own.** The VTA accepts a document over DIDComm or TSP only
+/// when its Data Integrity proof verifies as its `issuer` and that issuer is the
+/// transport sender (authcrypt for DIDComm, the sealed sender VID for TSP). So
+/// every document submitted is holder-signed (under `authentication`, except
+/// the approver's own decisions, the step-up `approve-response` and the
+/// `task-consent/decision`, which are signed under `assertionMethod`), names
+/// this device as `issuer` and the VTA as
+/// `recipient`, and carries a fresh `id` and `issuedAt`; the engine refuses to
+/// send one that does not. There is no
+/// challenge/authenticate round trip and nothing to refresh: possession of the
+/// holder key **is** the credential.
+///
+/// **Replies are verified before they are returned.** A reply is read only when
+/// it carries a proof by the VTA under `authentication`, is threaded to the
+/// request's `id`, and is addressed to this device — error replies included.
+/// Anything else is `FfiError.UnverifiedReply` and is discarded unread.
 ///
 /// The device's `did:key` must still be enrolled in the VTA's ACL
 /// (`pnm acl create --did <did:key> …`) — the same prerequisite REST had.
 public protocol VtaTransport {
     /// Submit `document` — a complete, holder-signed Trust Task document — and
-    /// return the framework `#response` document as JSON.
+    /// return the VTA's **verified** framework `#response` document as JSON.
     ///
     /// The returned bytes are the same shape REST used to return, so the
     /// engine's `parse*Response` functions consume them unchanged.
@@ -33,7 +44,10 @@ public protocol VtaTransport {
 /// The engine's `sendTrustTask` correlates the reply by `thid`, so this is a
 /// true request/response call and is safe to run concurrently with the inbox
 /// loop — the delivery layer demuxes replies to their waiter rather than
-/// letting them race the unsolicited stream.
+/// letting them race the unsolicited stream. The engine also verifies the reply
+/// (a proof by the session's VTA under `authentication`, threaded to the
+/// request) before returning it, and throws `FfiError.UnverifiedReply` if it
+/// cannot.
 public struct DidcommTransport: VtaTransport {
     private let session: MediatorSession
     private let timeoutSecs: UInt64
@@ -57,7 +71,8 @@ public struct DidcommTransport: VtaTransport {
 /// submit that tried to read its own reply would deadlock against a running
 /// inbox loop. Instead the inbox loop stays the single reader and hands every
 /// frame to a ``TspReplyRouter``, which matches replies back to their waiting
-/// `submit`. See ``TspReplyRouter`` for the correlation rule.
+/// `submit` and verifies each one before handing it over. See
+/// ``TspReplyRouter`` for the correlation and verification rules.
 public struct TspTransport: VtaTransport {
     private let session: TspMediatorSession
     private let vtaDid: String
@@ -89,7 +104,7 @@ public struct TspTransport: VtaTransport {
         // Register the expectation *before* sending: the VTA's reply can land on
         // the inbox before `sendTrustTask` has even returned, and an unexpected
         // `threadId` is passed through to the inbox loop as unsolicited traffic.
-        await router.expect(id)
+        await router.expect(id, request: document, from: vtaDid)
         do {
             try await session.sendTrustTask(
                 vtaDid: vtaDid, mediatorDid: mediatorDid, docJson: document)
@@ -102,50 +117,86 @@ public struct TspTransport: VtaTransport {
 }
 
 /// Correlates VTA replies arriving on the shared TSP inbox back to the `submit`
-/// call waiting for them.
+/// call waiting for them, and verifies each one before it is handed over.
 ///
 /// **The correlation rule.** The Trust Task framework builds a response with
 /// `threadId = request.threadId ?? request.id`, so a request sent with
 /// `id == X` is answered by a document carrying `threadId == X`.
 ///
+/// **The verification rule.** A document threaded to an expected request is a
+/// reply only once it verifies as the word of the peer the request was sent to
+/// (`verifyTrustTaskReply`: a proof by that peer under `authentication`,
+/// `threadId` and `type` answering the request, addressed to this device).
+/// Verification happens *before* the waiter is resolved, so a forged frame that
+/// merely echoes a `threadId` cannot take the waiter's place: it is not
+/// consumed, the expectation stays open, and the genuine reply still resolves
+/// the `submit` when it arrives. A `submit` whose reply never verifies times
+/// out rather than returning anything unverified.
+///
 /// **Ownership.** The inbox loop is the only reader of the TSP socket. It must
 /// offer every inbound document to ``deliver(_:)`` first; a `false` return means
-/// "not a reply anyone is waiting for", i.e. genuine unsolicited traffic (a
-/// step-up request, a task-consent request, an `announce` pong) that the loop
+/// "not a verified reply anyone is waiting for", i.e. unsolicited traffic (a
+/// step-up request, a task-consent request, an announce pong) that the loop
 /// should handle as it always has.
 public actor TspReplyRouter {
-    /// `threadId`s a `submit` has announced it wants, before its reply arrives.
-    /// Without this, ``deliver(_:)`` could not tell a reply meant for us from
-    /// unsolicited traffic that merely happens to carry a `threadId`.
-    private var expected: Set<String> = []
+    /// Verifies `reply` as `signer`'s answer to `request`, or throws.
+    public typealias ReplyVerifier =
+        @Sendable (_ request: String, _ reply: String, _ signer: String) async throws -> Void
+
+    /// What a `submit` has announced it is waiting for, keyed by the `threadId`
+    /// its reply will carry: the request as sent and the peer it was sent to,
+    /// which is what the reply is verified against. Without this, ``deliver(_:)``
+    /// could not tell a reply meant for us from unsolicited traffic that merely
+    /// happens to carry a `threadId`.
+    private var expected: [String: (request: String, signer: String)] = [:]
     /// Replies that arrived before their `wait` did — the common case, since the
     /// inbox loop and the sender run concurrently.
     private var arrived: [String: Result<String, Error>] = [:]
     private var waiters: [String: CheckedContinuation<String, Error>] = [:]
+    private let verify: ReplyVerifier
 
-    public init() {}
+    /// `verify` defaults to the engine's `verifyTrustTaskReply`; tests inject
+    /// their own.
+    public init(
+        verify: @escaping ReplyVerifier = { request, reply, signer in
+            try await verifyTrustTaskReply(
+                requestJson: request, replyJson: reply, expectedSigner: signer)
+        }
+    ) {
+        self.verify = verify
+    }
 
-    /// Announce that a reply with this `threadId` is coming. Call before sending.
-    func expect(_ threadId: String) {
-        expected.insert(threadId)
+    /// Announce that a reply to `request` (whose `id` is `threadId`), sent to
+    /// `signer`, is coming. Call before sending.
+    func expect(_ threadId: String, request: String, from signer: String) {
+        expected[threadId] = (request, signer)
     }
 
     /// Abandon an expectation (the send failed, so no reply is coming).
     func cancel(_ threadId: String) {
-        expected.remove(threadId)
+        expected[threadId] = nil
         arrived[threadId] = nil
         waiters[threadId] = nil
     }
 
     /// Offer an inbound document to the waiters.
     ///
-    /// Returns `true` when it was consumed as a correlated reply, `false` when
-    /// the inbox loop should treat it as an unsolicited inbound request.
-    public func deliver(_ document: String) -> Bool {
-        guard let thread = Self.threadId(of: document), expected.contains(thread) else {
+    /// Returns `true` when it was consumed as a verified, correlated reply;
+    /// `false` when the inbox loop should treat it as unsolicited. A document
+    /// that is threaded to an expected request but fails verification is **not**
+    /// consumed, and the request keeps waiting for its genuine reply.
+    public func deliver(_ document: String) async -> Bool {
+        guard let thread = Self.threadId(of: document), let pending = expected[thread] else {
             return false
         }
-        expected.remove(thread)
+        do {
+            try await verify(pending.request, document, pending.signer)
+        } catch {
+            return false
+        }
+        // Verification suspended this actor; the expectation may have been
+        // satisfied, cancelled or timed out meanwhile.
+        guard expected.removeValue(forKey: thread) != nil else { return false }
         if let waiter = waiters.removeValue(forKey: thread) {
             waiter.resume(returning: document)
         } else {
@@ -165,7 +216,7 @@ public actor TspReplyRouter {
             await self?.fail(
                 threadId,
                 AgentError.badResponse(
-                    "timed out after \(timeoutSecs)s waiting for the VTA's reply over TSP"))
+                    "timed out after \(timeoutSecs)s waiting for a verified reply from the VTA over TSP"))
         }
         defer { timeout.cancel() }
         return try await withCheckedThrowingContinuation { continuation in
@@ -181,7 +232,7 @@ public actor TspReplyRouter {
     /// already-satisfied request is a no-op here instead of parking an
     /// uncollectable `.failure` in `arrived`.
     private func fail(_ threadId: String, _ error: Error) {
-        guard expected.remove(threadId) != nil else { return }
+        guard expected.removeValue(forKey: threadId) != nil else { return }
         if let waiter = waiters.removeValue(forKey: threadId) {
             waiter.resume(throwing: error)
         } else {

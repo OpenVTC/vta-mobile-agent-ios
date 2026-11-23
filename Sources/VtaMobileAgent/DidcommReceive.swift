@@ -2,7 +2,7 @@ import Foundation
 import VtaMobileCore
 
 /// Inbound DIDComm for the **proxied** step-up path: the VTA addresses an
-/// `auth/step-up/approve-request/0.1` to the holder's approver DID (this device)
+/// `auth/step-up/approve-request/0.5` to the holder's approver DID (this device)
 /// and delivers it over DIDComm via the holder's mediator, instead of a desktop
 /// relaying a `403` body out-of-band. This device approves it with the holder
 /// key via the existing `approveStepUp`.
@@ -13,12 +13,14 @@ import VtaMobileCore
 /// - `receiveStepUpApproveRequest(packed:…)` — unpacks a raw packed message
 ///   itself (for transports that hand over ciphertext directly).
 extension VtaMobileAgent {
-    /// Trust Task `type`s of a step-up approve-request. The engine parses (and
-    /// verifies) both; 0.2's `didSigned` evidence spelling is normalised to
-    /// `did-signed` by the core so the rest of the app is version-independent.
+    /// Trust Task `type`s of a step-up approve-request: 0.5 only. Since
+    /// verifiable-trust-infrastructure#2327 the VTA, the VTC and the did-hosting
+    /// RP all mint 0.5, and the engine parses (and verifies) nothing else, so an
+    /// older document is not routed to a parse that would only reject it. The
+    /// engine normalises the wire's `didSigned` evidence spelling to
+    /// `did-signed`, and answers with `auth/step-up/approve-response/0.7`.
     static let stepUpApproveRequestTypes = [
-        "https://trusttasks.org/spec/auth/step-up/approve-request/0.1",
-        "https://trusttasks.org/spec/auth/step-up/approve-request/0.2",
+        "https://trusttasks.org/spec/auth/step-up/approve-request/0.5"
     ]
 
     /// Trust Task `type` of a task-consent request (the delegated-execution
@@ -31,7 +33,7 @@ extension VtaMobileAgent {
     /// DIDComm `body` document verbatim (the app re-parses it for display and to
     /// build the signed response/decision).
     public enum InboundRequest {
-        /// An `auth/step-up/approve-request/0.1` — answer with `approveStepUp` /
+        /// An `auth/step-up/approve-request/0.5` — answer with `approveStepUp` /
         /// `denyStepUp`.
         case stepUp(String)
         /// A `task-consent/request/0.1` — answer with `approveTaskConsent` /
@@ -211,8 +213,7 @@ extension VtaMobileAgent {
         return bodyString
     }
 
-    /// True when `doc` is an `auth/step-up/approve-request/0.1` or `/0.2`
-    /// document.
+    /// True when `doc` is an `auth/step-up/approve-request/0.5` document.
     static func isStepUpApproveRequest(_ doc: String) -> Bool {
         docType(doc).map(stepUpApproveRequestTypes.contains) ?? false
     }

@@ -4,7 +4,7 @@ import VtaMobileCore
 /// AAL1 → AAL2 **step-up approver**: the device holds the holder key, so it can
 /// ratify a step-up either for one of *its own* holder's sessions (**self** —
 /// e.g. a desktop hits a gated op, gets a `403` carrying an
-/// `auth/step-up/approve-request/0.1`, and relays it here out-of-band) or, as a
+/// `auth/step-up/approve-request/0.5`, and relays it here out-of-band) or, as a
 /// registered **delegated** approver, for *another* subject's session (the VTA
 /// addresses the request to this device as that subject's `stepUp.approver`).
 /// The engine builds the holder-signed `approve-response` (did-signed gate; the
@@ -21,7 +21,7 @@ extension VtaMobileAgent {
     }
 
     /// Approve a step-up described by `approveRequest` (either the bare
-    /// `auth/step-up/approve-request/0.1` document, or a VTA `403` body that
+    /// `auth/step-up/approve-request/0.5` document, or a VTA `403` body that
     /// carries it under `approveRequest`). Posts the holder-signed
     /// approve-response and returns the granted assurance level.
     ///

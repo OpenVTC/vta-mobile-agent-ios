@@ -8,11 +8,11 @@ import Foundation
 // might be in a separate module, or it might be compiled inline into
 // this module. This is a bit of light hackery to work with both.
 #if canImport(VtaMobileCoreFFI)
-    import VtaMobileCoreFFI
+import VtaMobileCoreFFI
 #endif
 
-private extension RustBuffer {
-    /// Allocate a new buffer, copying the contents of a `UInt8` array.
+fileprivate extension RustBuffer {
+    // Allocate a new buffer, copying the contents of a `UInt8` array.
     init(bytes: [UInt8]) {
         let rbuf = bytes.withUnsafeBufferPointer { ptr in
             RustBuffer.from(ptr)
@@ -21,23 +21,69 @@ private extension RustBuffer {
     }
 
     static func empty() -> RustBuffer {
-        RustBuffer(capacity: 0, len: 0, data: nil)
+        RustBuffer(capacity: 0, len:0, data: nil)
     }
 
     static func from(_ ptr: UnsafeBufferPointer<UInt8>) -> RustBuffer {
         try! rustCall { ffi_vta_mobile_core_rustbuffer_from_bytes(ForeignBytes(bufferPointer: ptr), $0) }
     }
 
-    /// Frees the buffer in place.
-    /// The buffer must not be used after this is called.
+    // Frees the buffer in place.
+    // The buffer must not be used after this is called.
     func deallocate() {
         try! rustCall { ffi_vta_mobile_core_rustbuffer_free(self, $0) }
     }
 }
 
-private extension ForeignBytes {
+fileprivate extension ForeignBytes {
     init(bufferPointer: UnsafeBufferPointer<UInt8>) {
         self.init(len: Int32(bufferPointer.count), data: bufferPointer.baseAddress)
+    }
+
+    init(rawBufferPointer: UnsafeRawBufferPointer) {
+        self.init(
+            len: Int32(rawBufferPointer.count),
+            data: rawBufferPointer.baseAddress?.assumingMemoryBound(to: UInt8.self)
+        )
+    }
+}
+
+// Converter for `&[u8]` / `[ByRef] bytes` arguments.
+//
+// Conforms to `FfiConverter` so the compiler enforces the full converter
+// method set. Only the scope-bound `lower(_:_body:)` overload is sound —
+// zero-copy byte buffers only flow foreign -> Rust, and only in argument
+// position. The four protocol-witness methods (`lift`, `lower`, `read`,
+// `write`) `fatalError` at runtime if anyone reaches them.
+//
+// The scope-bound `lower` takes a closure because the `ForeignBytes`
+// pointer is only guaranteed valid for the duration of
+// `Data.withUnsafeBytes`. Callers must run the full FFI call inside
+// the closure body.
+fileprivate enum FfiConverterByRefBytes: FfiConverter {
+    typealias SwiftType = Data
+    typealias FfiType = ForeignBytes
+
+    static func lower<R>(_ value: Data, _ body: (ForeignBytes) throws -> R) rethrows -> R {
+        return try value.withUnsafeBytes { rawBuf in
+            try body(ForeignBytes(rawBufferPointer: rawBuf))
+        }
+    }
+
+    static func lower(_ value: Data) -> ForeignBytes {
+        fatalError("ByRef bytes cannot use the plain lower: returning ForeignBytes escapes the Data.withUnsafeBytes scope. Use the scope-bound lower(_:_body:) overload instead.")
+    }
+
+    static func lift(_ value: ForeignBytes) throws -> Data {
+        fatalError("ByRef bytes cannot be lifted: zero-copy &[u8] only flows foreign->Rust")
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Data {
+        fatalError("ByRef bytes cannot be read from a buffer: zero-copy &[u8] is only supported in argument position, not nested in records/options/etc.")
+    }
+
+    static func write(_ value: Data, into buf: inout [UInt8]) {
+        fatalError("ByRef bytes cannot be written to a buffer: zero-copy &[u8] is only supported in argument position, not nested in records/options/etc.")
     }
 }
 
@@ -48,7 +94,7 @@ private extension ForeignBytes {
 // Helper classes/extensions that don't change.
 // Someday, this will be in a library of its own.
 
-private extension Data {
+fileprivate extension Data {
     init(rustBuffer: RustBuffer) {
         self.init(
             bytesNoCopy: rustBuffer.data!,
@@ -72,15 +118,15 @@ private extension Data {
 //
 // Instead, the read() method and these helper functions input a tuple of data
 
-private func createReader(data: Data) -> (data: Data, offset: Data.Index) {
+fileprivate func createReader(data: Data) -> (data: Data, offset: Data.Index) {
     (data: data, offset: 0)
 }
 
-/// Reads an integer at the current offset, in big-endian order, and advances
-/// the offset on success. Throws if reading the integer would move the
-/// offset past the end of the buffer.
-private func readInt<T: FixedWidthInteger>(_ reader: inout (data: Data, offset: Data.Index)) throws -> T {
-    let range = reader.offset ..< reader.offset + MemoryLayout<T>.size
+// Reads an integer at the current offset, in big-endian order, and advances
+// the offset on success. Throws if reading the integer would move the
+// offset past the end of the buffer.
+fileprivate func readInt<T: FixedWidthInteger>(_ reader: inout (data: Data, offset: Data.Index)) throws -> T {
+    let range = reader.offset..<reader.offset + MemoryLayout<T>.size
     guard reader.data.count >= range.upperBound else {
         throw UniffiInternalError.bufferOverflow
     }
@@ -90,38 +136,38 @@ private func readInt<T: FixedWidthInteger>(_ reader: inout (data: Data, offset: 
         return value as! T
     }
     var value: T = 0
-    let _ = withUnsafeMutableBytes(of: &value) { reader.data.copyBytes(to: $0, from: range) }
+    let _ = withUnsafeMutableBytes(of: &value, { reader.data.copyBytes(to: $0, from: range)})
     reader.offset = range.upperBound
     return value.bigEndian
 }
 
-/// Reads an arbitrary number of bytes, to be used to read
-/// raw bytes, this is useful when lifting strings
-private func readBytes(_ reader: inout (data: Data, offset: Data.Index), count: Int) throws -> [UInt8] {
-    let range = reader.offset ..< (reader.offset + count)
+// Reads an arbitrary number of bytes, to be used to read
+// raw bytes, this is useful when lifting strings
+fileprivate func readBytes(_ reader: inout (data: Data, offset: Data.Index), count: Int) throws -> Array<UInt8> {
+    let range = reader.offset..<(reader.offset+count)
     guard reader.data.count >= range.upperBound else {
         throw UniffiInternalError.bufferOverflow
     }
     var value = [UInt8](repeating: 0, count: count)
-    value.withUnsafeMutableBufferPointer { buffer in
+    value.withUnsafeMutableBufferPointer({ buffer in
         reader.data.copyBytes(to: buffer, from: range)
-    }
+    })
     reader.offset = range.upperBound
     return value
 }
 
-/// Reads a float at the current offset.
-private func readFloat(_ reader: inout (data: Data, offset: Data.Index)) throws -> Float {
-    return try Float(bitPattern: readInt(&reader))
+// Reads a float at the current offset.
+fileprivate func readFloat(_ reader: inout (data: Data, offset: Data.Index)) throws -> Float {
+    return Float(bitPattern: try readInt(&reader))
 }
 
-/// Reads a float at the current offset.
-private func readDouble(_ reader: inout (data: Data, offset: Data.Index)) throws -> Double {
-    return try Double(bitPattern: readInt(&reader))
+// Reads a float at the current offset.
+fileprivate func readDouble(_ reader: inout (data: Data, offset: Data.Index)) throws -> Double {
+    return Double(bitPattern: try readInt(&reader))
 }
 
-/// Indicates if the offset has reached the end of the buffer.
-private func hasRemaining(_ reader: (data: Data, offset: Data.Index)) -> Bool {
+// Indicates if the offset has reached the end of the buffer.
+fileprivate func hasRemaining(_ reader: (data: Data, offset: Data.Index)) -> Bool {
     return reader.offset < reader.data.count
 }
 
@@ -129,34 +175,34 @@ private func hasRemaining(_ reader: (data: Data, offset: Data.Index)) -> Bool {
 // struct, but we use standalone functions instead in order to make external
 // types work.  See the above discussion on Readers for details.
 
-private func createWriter() -> [UInt8] {
+fileprivate func createWriter() -> [UInt8] {
     return []
 }
 
-private func writeBytes<S: Sequence>(_ writer: inout [UInt8], _ byteArr: S) where S.Element == UInt8 {
+fileprivate func writeBytes<S>(_ writer: inout [UInt8], _ byteArr: S) where S: Sequence, S.Element == UInt8 {
     writer.append(contentsOf: byteArr)
 }
 
-/// Writes an integer in big-endian order.
-///
-/// Warning: make sure what you are trying to write
-/// is in the correct type!
-private func writeInt<T: FixedWidthInteger>(_ writer: inout [UInt8], _ value: T) {
+// Writes an integer in big-endian order.
+//
+// Warning: make sure what you are trying to write
+// is in the correct type!
+fileprivate func writeInt<T: FixedWidthInteger>(_ writer: inout [UInt8], _ value: T) {
     var value = value.bigEndian
     withUnsafeBytes(of: &value) { writer.append(contentsOf: $0) }
 }
 
-private func writeFloat(_ writer: inout [UInt8], _ value: Float) {
+fileprivate func writeFloat(_ writer: inout [UInt8], _ value: Float) {
     writeInt(&writer, value.bitPattern)
 }
 
-private func writeDouble(_ writer: inout [UInt8], _ value: Double) {
+fileprivate func writeDouble(_ writer: inout [UInt8], _ value: Double) {
     writeInt(&writer, value.bitPattern)
 }
 
-/// Protocol for types that transfer other types across the FFI. This is
-/// analogous to the Rust trait of the same name.
-private protocol FfiConverter {
+// Protocol for types that transfer other types across the FFI. This is
+// analogous to the Rust trait of the same name.
+fileprivate protocol FfiConverter {
     associatedtype FfiType
     associatedtype SwiftType
 
@@ -166,33 +212,33 @@ private protocol FfiConverter {
     static func write(_ value: SwiftType, into buf: inout [UInt8])
 }
 
-/// Types conforming to `Primitive` pass themselves directly over the FFI.
-private protocol FfiConverterPrimitive: FfiConverter where FfiType == SwiftType {}
+// Types conforming to `Primitive` pass themselves directly over the FFI.
+fileprivate protocol FfiConverterPrimitive: FfiConverter where FfiType == SwiftType { }
 
 extension FfiConverterPrimitive {
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func lift(_ value: FfiType) throws -> SwiftType {
         return value
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func lower(_ value: SwiftType) -> FfiType {
         return value
     }
 }
 
-/// Types conforming to `FfiConverterRustBuffer` lift and lower into a `RustBuffer`.
-/// Used for complex types where it's hard to write a custom lift/lower.
-private protocol FfiConverterRustBuffer: FfiConverter where FfiType == RustBuffer {}
+// Types conforming to `FfiConverterRustBuffer` lift and lower into a `RustBuffer`.
+// Used for complex types where it's hard to write a custom lift/lower.
+fileprivate protocol FfiConverterRustBuffer: FfiConverter where FfiType == RustBuffer {}
 
 extension FfiConverterRustBuffer {
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func lift(_ buf: RustBuffer) throws -> SwiftType {
         var reader = createReader(data: Data(rustBuffer: buf))
         let value = try read(from: &reader)
@@ -203,19 +249,18 @@ extension FfiConverterRustBuffer {
         return value
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func lower(_ value: SwiftType) -> RustBuffer {
-        var writer = createWriter()
-        write(value, into: &writer)
-        return RustBuffer(bytes: writer)
+          var writer = createWriter()
+          write(value, into: &writer)
+          return RustBuffer(bytes: writer)
     }
 }
-
-/// An error type for FFI errors. These errors occur at the UniFFI level, not
-/// the library level.
-private enum UniffiInternalError: LocalizedError {
+// An error type for FFI errors. These errors occur at the UniFFI level, not
+// the library level.
+fileprivate enum UniffiInternalError: LocalizedError {
     case bufferOverflow
     case incompleteData
     case unexpectedOptionalTag
@@ -226,7 +271,7 @@ private enum UniffiInternalError: LocalizedError {
     case unexpectedStaleHandle
     case rustPanic(_ message: String)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .bufferOverflow: return "Reading the requested value would read past the end of the buffer"
         case .incompleteData: return "The buffer still has data after lifting its containing value"
@@ -241,24 +286,24 @@ private enum UniffiInternalError: LocalizedError {
     }
 }
 
-private extension NSLock {
+fileprivate extension NSLock {
     func withLock<T>(f: () throws -> T) rethrows -> T {
-        lock()
+        self.lock()
         defer { self.unlock() }
         return try f()
     }
 }
 
-private let CALL_SUCCESS: Int8 = 0
-private let CALL_ERROR: Int8 = 1
-private let CALL_UNEXPECTED_ERROR: Int8 = 2
-private let CALL_CANCELLED: Int8 = 3
+fileprivate let CALL_SUCCESS: Int8 = 0
+fileprivate let CALL_ERROR: Int8 = 1
+fileprivate let CALL_UNEXPECTED_ERROR: Int8 = 2
+fileprivate let CALL_CANCELLED: Int8 = 3
 
-private extension RustCallStatus {
+fileprivate extension RustCallStatus {
     init() {
         self.init(
             code: CALL_SUCCESS,
-            errorBuf: RustBuffer(
+            errorBuf: RustBuffer.init(
                 capacity: 0,
                 len: 0,
                 data: nil
@@ -274,8 +319,7 @@ private func rustCall<T>(_ callback: (UnsafeMutablePointer<RustCallStatus>) -> T
 
 private func rustCallWithError<T, E: Swift.Error>(
     _ errorHandler: @escaping (RustBuffer) throws -> E,
-    _ callback: (UnsafeMutablePointer<RustCallStatus>) -> T
-) throws -> T {
+    _ callback: (UnsafeMutablePointer<RustCallStatus>) -> T) throws -> T {
     try makeRustCall(callback, errorHandler: errorHandler)
 }
 
@@ -283,8 +327,8 @@ private func makeRustCall<T, E: Swift.Error>(
     _ callback: (UnsafeMutablePointer<RustCallStatus>) -> T,
     errorHandler: ((RustBuffer) throws -> E)?
 ) throws -> T {
-    uniffiEnsureInitialized()
-    var callStatus = RustCallStatus()
+    uniffiEnsureVtaMobileCoreInitialized()
+    var callStatus = RustCallStatus.init()
     let returnedVal = callback(&callStatus)
     try uniffiCheckCallStatus(callStatus: callStatus, errorHandler: errorHandler)
     return returnedVal
@@ -295,44 +339,44 @@ private func uniffiCheckCallStatus<E: Swift.Error>(
     errorHandler: ((RustBuffer) throws -> E)?
 ) throws {
     switch callStatus.code {
-    case CALL_SUCCESS:
-        return
+        case CALL_SUCCESS:
+            return
 
-    case CALL_ERROR:
-        if let errorHandler = errorHandler {
-            throw try errorHandler(callStatus.errorBuf)
-        } else {
-            callStatus.errorBuf.deallocate()
-            throw UniffiInternalError.unexpectedRustCallError
-        }
+        case CALL_ERROR:
+            if let errorHandler = errorHandler {
+                throw try errorHandler(callStatus.errorBuf)
+            } else {
+                callStatus.errorBuf.deallocate()
+                throw UniffiInternalError.unexpectedRustCallError
+            }
 
-    case CALL_UNEXPECTED_ERROR:
-        // When the rust code sees a panic, it tries to construct a RustBuffer
-        // with the message.  But if that code panics, then it just sends back
-        // an empty buffer.
-        if callStatus.errorBuf.len > 0 {
-            throw try UniffiInternalError.rustPanic(FfiConverterString.lift(callStatus.errorBuf))
-        } else {
-            callStatus.errorBuf.deallocate()
-            throw UniffiInternalError.rustPanic("Rust panic")
-        }
+        case CALL_UNEXPECTED_ERROR:
+            // When the rust code sees a panic, it tries to construct a RustBuffer
+            // with the message.  But if that code panics, then it just sends back
+            // an empty buffer.
+            if callStatus.errorBuf.len > 0 {
+                throw UniffiInternalError.rustPanic(try FfiConverterString.lift(callStatus.errorBuf))
+            } else {
+                callStatus.errorBuf.deallocate()
+                throw UniffiInternalError.rustPanic("Rust panic")
+            }
 
-    case CALL_CANCELLED:
-        fatalError("Cancellation not supported yet")
+        case CALL_CANCELLED:
+            fatalError("Cancellation not supported yet")
 
-    default:
-        throw UniffiInternalError.unexpectedRustCallStatusCode
+        default:
+            throw UniffiInternalError.unexpectedRustCallStatusCode
     }
 }
 
 private func uniffiTraitInterfaceCall<T>(
     callStatus: UnsafeMutablePointer<RustCallStatus>,
     makeCall: () throws -> T,
-    writeReturn: (T) -> Void
+    writeReturn: (T) -> ()
 ) {
     do {
         try writeReturn(makeCall())
-    } catch {
+    } catch let error {
         callStatus.pointee.code = CALL_UNEXPECTED_ERROR
         callStatus.pointee.errorBuf = FfiConverterString.lower(String(describing: error))
     }
@@ -341,7 +385,7 @@ private func uniffiTraitInterfaceCall<T>(
 private func uniffiTraitInterfaceCallWithError<T, E>(
     callStatus: UnsafeMutablePointer<RustCallStatus>,
     makeCall: () throws -> T,
-    writeReturn: (T) -> Void,
+    writeReturn: (T) -> (),
     lowerError: (E) -> RustBuffer
 ) {
     do {
@@ -354,27 +398,46 @@ private func uniffiTraitInterfaceCallWithError<T, E>(
         callStatus.pointee.errorBuf = FfiConverterString.lower(String(describing: error))
     }
 }
+// Initial value and increment amount for handles. 
+// These ensure that SWIFT handles always have the lowest bit set
+fileprivate let UNIFFI_HANDLEMAP_INITIAL: UInt64 = 1
+fileprivate let UNIFFI_HANDLEMAP_DELTA: UInt64 = 2
 
-private class UniffiHandleMap<T> {
-    private var map: [UInt64: T] = [:]
+fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
+    // All mutation happens with this lock held, which is why we implement @unchecked Sendable.
     private let lock = NSLock()
-    private var currentHandle: UInt64 = 1
+    private var map: [UInt64: T] = [:]
+    private var currentHandle: UInt64 = UNIFFI_HANDLEMAP_INITIAL
 
     func insert(obj: T) -> UInt64 {
         lock.withLock {
-            let handle = currentHandle
-            currentHandle += 1
-            map[handle] = obj
-            return handle
+            return doInsert(obj)
         }
     }
 
-    func get(handle: UInt64) throws -> T {
+    // Low-level insert function, this assumes `lock` is held.
+    private func doInsert(_ obj: T) -> UInt64 {
+        let handle = currentHandle
+        currentHandle += UNIFFI_HANDLEMAP_DELTA
+        map[handle] = obj
+        return handle
+    }
+
+     func get(handle: UInt64) throws -> T {
         try lock.withLock {
             guard let obj = map[handle] else {
                 throw UniffiInternalError.unexpectedStaleHandle
             }
             return obj
+        }
+    }
+
+     func clone(handle: UInt64) throws -> UInt64 {
+        try lock.withLock {
+            guard let obj = map[handle] else {
+                throw UniffiInternalError.unexpectedStaleHandle
+            }
+            return doInsert(obj)
         }
     }
 
@@ -389,76 +452,86 @@ private class UniffiHandleMap<T> {
     }
 
     var count: Int {
-        map.count
+        get {
+            map.count
+        }
     }
 }
 
+
 // Public interface members begin here.
+// Magic number for the Rust proxy to call using the same mechanism as every other method,
+// to free the callback once it's dropped by Rust.
+private let IDX_CALLBACK_FREE: Int32 = 0
+// Callback return codes
+private let UNIFFI_CALLBACK_SUCCESS: Int32 = 0
+private let UNIFFI_CALLBACK_ERROR: Int32 = 1
+private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterUInt32: FfiConverterPrimitive {
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
     typealias FfiType = UInt32
     typealias SwiftType = UInt32
 
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
         return try lift(readInt(&buf))
     }
 
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
         writeInt(&buf, lower(value))
     }
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterUInt64: FfiConverterPrimitive {
+fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
     typealias FfiType = UInt64
     typealias SwiftType = UInt64
 
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt64 {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt64 {
         return try lift(readInt(&buf))
     }
 
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
         writeInt(&buf, lower(value))
     }
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterBool: FfiConverter {
+fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
 
-    static func lift(_ value: Int8) throws -> Bool {
+    public static func lift(_ value: Int8) throws -> Bool {
         return value != 0
     }
 
-    static func lower(_ value: Bool) -> Int8 {
+    public static func lower(_ value: Bool) -> Int8 {
         return value ? 1 : 0
     }
 
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Bool {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Bool {
         return try lift(readInt(&buf))
     }
 
-    static func write(_ value: Bool, into buf: inout [UInt8]) {
+    public static func write(_ value: Bool, into buf: inout [UInt8]) {
         writeInt(&buf, lower(value))
     }
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterString: FfiConverter {
+fileprivate struct FfiConverterString: FfiConverter {
     typealias SwiftType = String
     typealias FfiType = RustBuffer
 
-    static func lift(_ value: RustBuffer) throws -> String {
+    public static func lift(_ value: RustBuffer) throws -> String {
         defer {
             value.deallocate()
         }
@@ -466,10 +539,14 @@ private struct FfiConverterString: FfiConverter {
             return String()
         }
         let bytes = UnsafeBufferPointer<UInt8>(start: value.data!, count: Int(value.len))
-        return String(bytes: bytes, encoding: String.Encoding.utf8)!
+        // Use Swift's native UTF-8 decoder; `String(bytes:encoding:.utf8)` goes
+        // through Foundation's NSString and silently strips a leading U+FEFF BOM.
+        // Invalid UTF-8 substitutes U+FFFD instead of trapping (unreachable
+        // given Rust's `String` invariant).
+        return String(decoding: bytes, as: UTF8.self)
     }
 
-    static func lower(_ value: String) -> RustBuffer {
+    public static func lower(_ value: String) -> RustBuffer {
         return value.utf8CString.withUnsafeBufferPointer { ptr in
             // The swift string gives us int8_t, we want uint8_t.
             ptr.withMemoryRebound(to: UInt8.self) { ptr in
@@ -480,12 +557,13 @@ private struct FfiConverterString: FfiConverter {
         }
     }
 
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> String {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> String {
         let len: Int32 = try readInt(&buf)
-        return try String(bytes: readBytes(&buf, count: Int(len)), encoding: String.Encoding.utf8)!
+        // See `lift` above for why we avoid Foundation's NSString-backed decoder here.
+        return String(decoding: try readBytes(&buf, count: Int(len)), as: UTF8.self)
     }
 
-    static func write(_ value: String, into buf: inout [UInt8]) {
+    public static func write(_ value: String, into buf: inout [UInt8]) {
         let len = Int32(value.utf8.count)
         writeInt(&buf, len)
         writeBytes(&buf, value.utf8)
@@ -493,34 +571,38 @@ private struct FfiConverterString: FfiConverter {
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterData: FfiConverterRustBuffer {
+fileprivate struct FfiConverterData: FfiConverterRustBuffer {
     typealias SwiftType = Data
 
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Data {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Data {
         let len: Int32 = try readInt(&buf)
-        return try Data(readBytes(&buf, count: Int(len)))
+        return Data(try readBytes(&buf, count: Int(len)))
     }
 
-    static func write(_ value: Data, into buf: inout [UInt8]) {
+    public static func write(_ value: Data, into buf: inout [UInt8]) {
         let len = Int32(value.count)
         writeInt(&buf, len)
         writeBytes(&buf, value)
     }
 }
 
+
+
+
 /**
  * A DIDComm session bound to one holder identity. Holds the library agent
  * (the holder identity + resolved peers). Thread-safe via an internal lock.
  */
-public protocol DidcommSessionProtocol: AnyObject {
+public protocol DidcommSessionProtocol: AnyObject, Sendable {
+    
     /**
      * Add a resolved peer (its key-agreement public key) so the session can
      * authcrypt to it and verify its authcrypt.
      */
-    func addPeer(peer: Peer) throws
-
+    func addPeer(peer: Peer) throws 
+    
     /**
      * Register a mediator route for `recipient_did`. Once set, `pack_authcrypt`
      * / `pack_anoncrypt` to that recipient are automatically wrapped in a
@@ -528,108 +610,115 @@ public protocol DidcommSessionProtocol: AnyObject {
      * mobile agent delivers to a peer that is only reachable via its mediator.
      * `mediator` carries the mediator's resolved key-agreement key.
      */
-    func addRoute(recipientDid: String, mediator: Peer) throws
-
+    func addRoute(recipientDid: String, mediator: Peer) throws 
+    
     /**
      * Anoncrypt (encrypted, *not* sender-authenticated) a plaintext DIDComm
      * message JSON to `recipient_did` (which MUST have been added via
      * [`add_peer`](Self::add_peer)). Use when the sender should stay anonymous
      * to the recipient.
      */
-    func packAnoncrypt(messageJson: String, recipientDid: String) throws -> String
-
+    func packAnoncrypt(messageJson: String, recipientDid: String) throws  -> String
+    
     /**
      * Authcrypt (sender-authenticated, encrypted) a plaintext DIDComm message
      * JSON to `recipient_did` — which MUST have been added via
      * [`add_peer`](Self::add_peer). Returns the JWE the native layer sends
      * (typically wrapped in a `routing/2.0/forward` to the mediator).
      */
-    func packAuthcrypt(messageJson: String, recipientDid: String) throws -> String
-
+    func packAuthcrypt(messageJson: String, recipientDid: String) throws  -> String
+    
     /**
      * Decrypt/verify an inbound DIDComm message (authcrypt / anoncrypt / signed
      * / plaintext). For authcrypt verification, pass the expected `sender_did`
      * (which must have been added via [`add_peer`](Self::add_peer)).
      */
-    func unpack(packed: String, senderDid: String?) throws -> UnpackedMessage
+    func unpack(packed: String, senderDid: String?) throws  -> UnpackedMessage
+    
 }
-
 /**
  * A DIDComm session bound to one holder identity. Holds the library agent
  * (the holder identity + resolved peers). Thread-safe via an internal lock.
  */
-open class DidcommSession:
-    DidcommSessionProtocol
-{
-    fileprivate let pointer: UnsafeMutableRawPointer!
+open class DidcommSession: DidcommSessionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
 
-    // Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public struct NoPointer {
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
         public init() {}
     }
 
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
-    public required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
-        self.pointer = pointer
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
     }
 
     // This constructor can be used to instantiate a fake object.
-    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
     //
     // - Warning:
-    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public init(noPointer _: NoPointer) {
-        pointer = nil
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
-        return try! rustCall { uniffi_vta_mobile_core_fn_clone_didcommsession(self.pointer, $0) }
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_vta_mobile_core_fn_clone_didcommsession(self.handle, $0) }
     }
-
     /**
      * Open a session for the holder, building its [`PrivateIdentity`] from the
      * supplied (Tier-2, software-held) key material.
      */
-    public convenience init(holder: HolderKeys) throws {
-        let pointer =
-            try rustCallWithError(FfiConverterTypeFfiError.lift) {
-                uniffi_vta_mobile_core_fn_constructor_didcommsession_new(
-                    FfiConverterTypeHolderKeys.lower(holder), $0
-                )
-            }
-        self.init(unsafeFromRawPointer: pointer)
-    }
+public convenience init(holder: HolderKeys)throws  {
+    let handle =
+        try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_constructor_didcommsession_new(
+        FfiConverterTypeHolderKeys_lower(holder),uniffiCallStatus
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
 
     deinit {
-        guard let pointer = pointer else {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
             return
         }
 
-        try! rustCall { uniffi_vta_mobile_core_fn_free_didcommsession(pointer, $0) }
+        try! rustCall { uniffi_vta_mobile_core_fn_free_didcommsession(handle, $0) }
     }
 
+    
+
+    
     /**
      * Add a resolved peer (its key-agreement public key) so the session can
      * authcrypt to it and verify its authcrypt.
      */
-    open func addPeer(peer: Peer) throws {
-        try rustCallWithError(FfiConverterTypeFfiError.lift) {
-            uniffi_vta_mobile_core_fn_method_didcommsession_add_peer(self.uniffiClonePointer(),
-                                                                     FfiConverterTypePeer.lower(peer), $0)
-        }
-    }
-
+open func addPeer(peer: Peer)throws   {try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_method_didcommsession_add_peer(
+            self.uniffiCloneHandle(),
+        FfiConverterTypePeer_lower(peer),uniffiCallStatus
+    )
+}
+}
+    
     /**
      * Register a mediator route for `recipient_did`. Once set, `pack_authcrypt`
      * / `pack_anoncrypt` to that recipient are automatically wrapped in a
@@ -637,107 +726,121 @@ open class DidcommSession:
      * mobile agent delivers to a peer that is only reachable via its mediator.
      * `mediator` carries the mediator's resolved key-agreement key.
      */
-    open func addRoute(recipientDid: String, mediator: Peer) throws {
-        try rustCallWithError(FfiConverterTypeFfiError.lift) {
-            uniffi_vta_mobile_core_fn_method_didcommsession_add_route(self.uniffiClonePointer(),
-                                                                      FfiConverterString.lower(recipientDid),
-                                                                      FfiConverterTypePeer.lower(mediator), $0)
-        }
-    }
-
+open func addRoute(recipientDid: String, mediator: Peer)throws   {try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_method_didcommsession_add_route(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(recipientDid),
+        FfiConverterTypePeer_lower(mediator),uniffiCallStatus
+    )
+}
+}
+    
     /**
      * Anoncrypt (encrypted, *not* sender-authenticated) a plaintext DIDComm
      * message JSON to `recipient_did` (which MUST have been added via
      * [`add_peer`](Self::add_peer)). Use when the sender should stay anonymous
      * to the recipient.
      */
-    open func packAnoncrypt(messageJson: String, recipientDid: String) throws -> String {
-        return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-            uniffi_vta_mobile_core_fn_method_didcommsession_pack_anoncrypt(self.uniffiClonePointer(),
-                                                                           FfiConverterString.lower(messageJson),
-                                                                           FfiConverterString.lower(recipientDid), $0)
-        })
-    }
-
+open func packAnoncrypt(messageJson: String, recipientDid: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_method_didcommsession_pack_anoncrypt(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageJson),
+        FfiConverterString.lower(recipientDid),uniffiCallStatus
+    )
+})
+}
+    
     /**
      * Authcrypt (sender-authenticated, encrypted) a plaintext DIDComm message
      * JSON to `recipient_did` — which MUST have been added via
      * [`add_peer`](Self::add_peer). Returns the JWE the native layer sends
      * (typically wrapped in a `routing/2.0/forward` to the mediator).
      */
-    open func packAuthcrypt(messageJson: String, recipientDid: String) throws -> String {
-        return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-            uniffi_vta_mobile_core_fn_method_didcommsession_pack_authcrypt(self.uniffiClonePointer(),
-                                                                           FfiConverterString.lower(messageJson),
-                                                                           FfiConverterString.lower(recipientDid), $0)
-        })
-    }
-
+open func packAuthcrypt(messageJson: String, recipientDid: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_method_didcommsession_pack_authcrypt(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageJson),
+        FfiConverterString.lower(recipientDid),uniffiCallStatus
+    )
+})
+}
+    
     /**
      * Decrypt/verify an inbound DIDComm message (authcrypt / anoncrypt / signed
      * / plaintext). For authcrypt verification, pass the expected `sender_did`
      * (which must have been added via [`add_peer`](Self::add_peer)).
      */
-    open func unpack(packed: String, senderDid: String?) throws -> UnpackedMessage {
-        return try FfiConverterTypeUnpackedMessage.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-            uniffi_vta_mobile_core_fn_method_didcommsession_unpack(self.uniffiClonePointer(),
-                                                                   FfiConverterString.lower(packed),
-                                                                   FfiConverterOptionString.lower(senderDid), $0)
-        })
-    }
+open func unpack(packed: String, senderDid: String?)throws  -> UnpackedMessage  {
+    return try  FfiConverterTypeUnpackedMessage_lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_method_didcommsession_unpack(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(packed),
+        FfiConverterOptionString.lower(senderDid),uniffiCallStatus
+    )
+})
+}
+    
+
+    
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeDidcommSession: FfiConverter {
-    typealias FfiType = UnsafeMutableRawPointer
+    typealias FfiType = UInt64
     typealias SwiftType = DidcommSession
 
-    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> DidcommSession {
-        return DidcommSession(unsafeFromRawPointer: pointer)
+    public static func lift(_ handle: UInt64) throws -> DidcommSession {
+        return DidcommSession(unsafeFromHandle: handle)
     }
 
-    public static func lower(_ value: DidcommSession) -> UnsafeMutableRawPointer {
-        return value.uniffiClonePointer()
+    public static func lower(_ value: DidcommSession) -> UInt64 {
+        return value.uniffiCloneHandle()
     }
 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DidcommSession {
-        let v: UInt64 = try readInt(&buf)
-        // The Rust code won't compile if a pointer won't fit in a UInt64.
-        // We have to go via `UInt` because that's the thing that's the size of a pointer.
-        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
-        if ptr == nil {
-            throw UniffiInternalError.unexpectedNullPointer
-        }
-        return try lift(ptr!)
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
     }
 
     public static func write(_ value: DidcommSession, into buf: inout [UInt8]) {
-        // This fiddling is because `Int` is the thing that's the same size as a pointer.
-        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
-        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+        writeInt(&buf, lower(value))
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-public func FfiConverterTypeDidcommSession_lift(_ pointer: UnsafeMutableRawPointer) throws -> DidcommSession {
-    return try FfiConverterTypeDidcommSession.lift(pointer)
+public func FfiConverterTypeDidcommSession_lift(_ handle: UInt64) throws -> DidcommSession {
+    return try FfiConverterTypeDidcommSession.lift(handle)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-public func FfiConverterTypeDidcommSession_lower(_ value: DidcommSession) -> UnsafeMutableRawPointer {
+public func FfiConverterTypeDidcommSession_lower(_ value: DidcommSession) -> UInt64 {
     return FfiConverterTypeDidcommSession.lower(value)
 }
+
+
+
+
+
 
 /**
  * A live DIDComm session to a mediator, scoped to one holder identity.
  */
-public protocol MediatorSessionProtocol: AnyObject {
+public protocol MediatorSessionProtocol: AnyObject, Sendable {
+    
     /**
      * Wait up to `timeout_secs` for the next inbound DIDComm message from the
      * mediator. Returns the unpacked message as JSON (`{ id, type, body, … }`)
@@ -745,8 +848,8 @@ public protocol MediatorSessionProtocol: AnyObject {
      * or `None` if nothing arrived within the timeout. Call again to keep
      * polling.
      */
-    func receiveNext(timeoutSecs: UInt64) async throws -> String?
-
+    func receiveNext(timeoutSecs: UInt64) async throws  -> String?
+    
     /**
      * Submit a Trust Task document to the VTA over this mediator session and
      * wait up to `timeout_secs` for its `#response`. Returns the framework
@@ -759,83 +862,96 @@ public protocol MediatorSessionProtocol: AnyObject {
      * `messaging::handlers::handle_trust_task` unwraps it into the same
      * `dispatch_trust_task_core` the REST route calls.
      *
-     * **No bearer token.** The message is authcrypt-packed, so the VTA proves
-     * the sender DID cryptographically and derives authorization from it
-     * (intrinsic-sender auth) — this is what lets a device operate with no VTA
-     * REST API at all.
+     * **The document authenticates the request, not the transport.** The VTA
+     * accepts it only when its Data Integrity proof verifies as its `issuer`
+     * and that issuer is the authcrypt sender. So the document must be signed
+     * by this session's holder, name it as `issuer` and name the VTA as
+     * `recipient`; anything else is refused before it is sent
+     * ([`crate::reply::require_signed_request`]). There is no bearer token.
+     *
+     * **The reply is verified before it is returned**
+     * ([`crate::reply::verify_trust_task_reply`]): it must carry a proof by the
+     * VTA under `authentication`, be threaded to this document's `id`, and be
+     * addressed to this holder. A reply that is not is
+     * [`FfiError::UnverifiedReply`] and its content is never returned.
      *
      * Safe to call while a [`receive_next`](Self::receive_next) loop is
      * running: the reply is demuxed to this caller by `thid`, so it can't be
      * stolen by (or steal from) the unsolicited inbound stream.
      */
-    func sendTrustTask(docJson: String, timeoutSecs: UInt64) async throws -> String
-
+    func sendTrustTask(docJson: String, timeoutSecs: UInt64) async throws  -> String
+    
     /**
      * Send a Trust Task document without awaiting a response — the
      * fire-and-forget counterpart to
      * [`send_trust_task`](Self::send_trust_task), for documents whose outcome
      * the caller doesn't need (or will pick up off the inbox itself).
+     *
+     * The same outbound rule as `send_trust_task` applies: only a document
+     * signed by this session's holder and addressed to the VTA is sent.
      */
-    func sendTrustTaskOneWay(docJson: String) async throws
-
+    func sendTrustTaskOneWay(docJson: String) async throws 
+    
     /**
      * Gracefully close the mediator connection (live-delivery WebSocket).
      */
-    func shutdown() async
+    func shutdown() async 
+    
 }
-
 /**
  * A live DIDComm session to a mediator, scoped to one holder identity.
  */
-open class MediatorSession:
-    MediatorSessionProtocol
-{
-    fileprivate let pointer: UnsafeMutableRawPointer!
+open class MediatorSession: MediatorSessionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
 
-    // Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public struct NoPointer {
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
         public init() {}
     }
 
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
-    public required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
-        self.pointer = pointer
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
     }
 
     // This constructor can be used to instantiate a fake object.
-    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
     //
     // - Warning:
-    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public init(noPointer _: NoPointer) {
-        pointer = nil
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
-        return try! rustCall { uniffi_vta_mobile_core_fn_clone_mediatorsession(self.pointer, $0) }
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_vta_mobile_core_fn_clone_mediatorsession(self.handle, $0) }
     }
-
     // No primary constructor declared for this class.
 
     deinit {
-        guard let pointer = pointer else {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
             return
         }
 
-        try! rustCall { uniffi_vta_mobile_core_fn_free_mediatorsession(pointer, $0) }
+        try! rustCall { uniffi_vta_mobile_core_fn_free_mediatorsession(handle, $0) }
     }
 
+    
     /**
      * Connect to `mediator_did` as the holder and open live delivery.
      *
@@ -846,20 +962,53 @@ open class MediatorSession:
      * - `vta_did`: the peer (VTA) this holder converses with.
      * - `mediator_did`: the mediator to connect through.
      */
-    public static func connect(holderDid: String, holderSigningPrivateEd25519: Data, vtaDid: String, mediatorDid: String) async throws -> MediatorSession {
-        return
-            try await uniffiRustCallAsync(
-                rustFutureFunc: {
-                    uniffi_vta_mobile_core_fn_constructor_mediatorsession_connect(FfiConverterString.lower(holderDid), FfiConverterData.lower(holderSigningPrivateEd25519), FfiConverterString.lower(vtaDid), FfiConverterString.lower(mediatorDid))
-                },
-                pollFunc: ffi_vta_mobile_core_rust_future_poll_pointer,
-                completeFunc: ffi_vta_mobile_core_rust_future_complete_pointer,
-                freeFunc: ffi_vta_mobile_core_rust_future_free_pointer,
-                liftFunc: FfiConverterTypeMediatorSession.lift,
-                errorHandler: FfiConverterTypeFfiError.lift
-            )
-    }
+public static func connect(holderDid: String, holderSigningPrivateEd25519: Data, vtaDid: String, mediatorDid: String)async throws  -> MediatorSession  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_constructor_mediatorsession_connect(FfiConverterString.lower(holderDid),FfiConverterData.lower(holderSigningPrivateEd25519),FfiConverterString.lower(vtaDid),FfiConverterString.lower(mediatorDid)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_u64,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_u64,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_u64,
+            liftFunc: FfiConverterTypeMediatorSession_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Connect to `mediator_did` as a holder that is **not** a `did:key`, with its secrets
+     * given one per verification method — a `did:peer:2` relationship DID, whose signing
+     * key `V` and key-agreement key `E` are independent, so [`connect`](Self::connect)'s
+     * one seed cannot express them. This is the session a wallet carries witness documents
+     * on ([`crate::witness`]): its holder is the relationship DID, its peer the witness.
+     *
+     * - `holder_did`: the holder DID.
+     * - `secrets`: its private keys, each under the verification-method id it is
+     * published as. Checked against the resolved document before any socket opens
+     * ([`crate::holder_secrets`]): every one must be the key published at its id, and
+     * there must be an Ed25519 `authentication` key and an X25519 `keyAgreement` key.
+     * - `peer_did`: the peer this session converses with — a VTA, or a witness.
+     * - `mediator_did`: the mediator to connect through.
+     */
+public static func connectWithSecrets(holderDid: String, secrets: [HolderSecret], peerDid: String, mediatorDid: String)async throws  -> MediatorSession  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_constructor_mediatorsession_connect_with_secrets(FfiConverterString.lower(holderDid),FfiConverterSequenceTypeHolderSecret.lower(secrets),FfiConverterString.lower(peerDid),FfiConverterString.lower(mediatorDid)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_u64,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_u64,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_u64,
+            liftFunc: FfiConverterTypeMediatorSession_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
 
+    
     /**
      * Wait up to `timeout_secs` for the next inbound DIDComm message from the
      * mediator. Returns the unpacked message as JSON (`{ id, type, body, … }`)
@@ -867,23 +1016,22 @@ open class MediatorSession:
      * or `None` if nothing arrived within the timeout. Call again to keep
      * polling.
      */
-    open func receiveNext(timeoutSecs: UInt64) async throws -> String? {
-        return
-            try await uniffiRustCallAsync(
-                rustFutureFunc: {
-                    uniffi_vta_mobile_core_fn_method_mediatorsession_receive_next(
-                        self.uniffiClonePointer(),
-                        FfiConverterUInt64.lower(timeoutSecs)
-                    )
-                },
-                pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
-                completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
-                freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
-                liftFunc: FfiConverterOptionString.lift,
-                errorHandler: FfiConverterTypeFfiError.lift
-            )
-    }
-
+open func receiveNext(timeoutSecs: UInt64)async throws  -> String?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_method_mediatorsession_receive_next(
+                        self.uniffiCloneHandle(),FfiConverterUInt64.lower(timeoutSecs)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionString.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
     /**
      * Submit a Trust Task document to the VTA over this mediator session and
      * wait up to `timeout_secs` for its `#response`. Returns the framework
@@ -896,136 +1044,139 @@ open class MediatorSession:
      * `messaging::handlers::handle_trust_task` unwraps it into the same
      * `dispatch_trust_task_core` the REST route calls.
      *
-     * **No bearer token.** The message is authcrypt-packed, so the VTA proves
-     * the sender DID cryptographically and derives authorization from it
-     * (intrinsic-sender auth) — this is what lets a device operate with no VTA
-     * REST API at all.
+     * **The document authenticates the request, not the transport.** The VTA
+     * accepts it only when its Data Integrity proof verifies as its `issuer`
+     * and that issuer is the authcrypt sender. So the document must be signed
+     * by this session's holder, name it as `issuer` and name the VTA as
+     * `recipient`; anything else is refused before it is sent
+     * ([`crate::reply::require_signed_request`]). There is no bearer token.
+     *
+     * **The reply is verified before it is returned**
+     * ([`crate::reply::verify_trust_task_reply`]): it must carry a proof by the
+     * VTA under `authentication`, be threaded to this document's `id`, and be
+     * addressed to this holder. A reply that is not is
+     * [`FfiError::UnverifiedReply`] and its content is never returned.
      *
      * Safe to call while a [`receive_next`](Self::receive_next) loop is
      * running: the reply is demuxed to this caller by `thid`, so it can't be
      * stolen by (or steal from) the unsolicited inbound stream.
      */
-    open func sendTrustTask(docJson: String, timeoutSecs: UInt64) async throws -> String {
-        return
-            try await uniffiRustCallAsync(
-                rustFutureFunc: {
-                    uniffi_vta_mobile_core_fn_method_mediatorsession_send_trust_task(
-                        self.uniffiClonePointer(),
-                        FfiConverterString.lower(docJson), FfiConverterUInt64.lower(timeoutSecs)
-                    )
-                },
-                pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
-                completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
-                freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
-                liftFunc: FfiConverterString.lift,
-                errorHandler: FfiConverterTypeFfiError.lift
-            )
-    }
-
+open func sendTrustTask(docJson: String, timeoutSecs: UInt64)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_method_mediatorsession_send_trust_task(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(docJson),FfiConverterUInt64.lower(timeoutSecs)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
     /**
      * Send a Trust Task document without awaiting a response — the
      * fire-and-forget counterpart to
      * [`send_trust_task`](Self::send_trust_task), for documents whose outcome
      * the caller doesn't need (or will pick up off the inbox itself).
+     *
+     * The same outbound rule as `send_trust_task` applies: only a document
+     * signed by this session's holder and addressed to the VTA is sent.
      */
-    open func sendTrustTaskOneWay(docJson: String) async throws {
-        return
-            try await uniffiRustCallAsync(
-                rustFutureFunc: {
-                    uniffi_vta_mobile_core_fn_method_mediatorsession_send_trust_task_one_way(
-                        self.uniffiClonePointer(),
-                        FfiConverterString.lower(docJson)
-                    )
-                },
-                pollFunc: ffi_vta_mobile_core_rust_future_poll_void,
-                completeFunc: ffi_vta_mobile_core_rust_future_complete_void,
-                freeFunc: ffi_vta_mobile_core_rust_future_free_void,
-                liftFunc: { $0 },
-                errorHandler: FfiConverterTypeFfiError.lift
-            )
-    }
-
+open func sendTrustTaskOneWay(docJson: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_method_mediatorsession_send_trust_task_one_way(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(docJson)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_void,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_void,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
     /**
      * Gracefully close the mediator connection (live-delivery WebSocket).
      */
-    open func shutdown() async {
-        return
-            try! await uniffiRustCallAsync(
-                rustFutureFunc: {
-                    uniffi_vta_mobile_core_fn_method_mediatorsession_shutdown(
-                        self.uniffiClonePointer()
-                    )
-                },
-                pollFunc: ffi_vta_mobile_core_rust_future_poll_void,
-                completeFunc: ffi_vta_mobile_core_rust_future_complete_void,
-                freeFunc: ffi_vta_mobile_core_rust_future_free_void,
-                liftFunc: { $0 },
-                errorHandler: nil
-            )
-    }
+open func shutdown()async   {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_method_mediatorsession_shutdown(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_void,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_void,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: nil
+            
+        )
+}
+    
+
+    
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeMediatorSession: FfiConverter {
-    typealias FfiType = UnsafeMutableRawPointer
+    typealias FfiType = UInt64
     typealias SwiftType = MediatorSession
 
-    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> MediatorSession {
-        return MediatorSession(unsafeFromRawPointer: pointer)
+    public static func lift(_ handle: UInt64) throws -> MediatorSession {
+        return MediatorSession(unsafeFromHandle: handle)
     }
 
-    public static func lower(_ value: MediatorSession) -> UnsafeMutableRawPointer {
-        return value.uniffiClonePointer()
+    public static func lower(_ value: MediatorSession) -> UInt64 {
+        return value.uniffiCloneHandle()
     }
 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MediatorSession {
-        let v: UInt64 = try readInt(&buf)
-        // The Rust code won't compile if a pointer won't fit in a UInt64.
-        // We have to go via `UInt` because that's the thing that's the size of a pointer.
-        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
-        if ptr == nil {
-            throw UniffiInternalError.unexpectedNullPointer
-        }
-        return try lift(ptr!)
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
     }
 
     public static func write(_ value: MediatorSession, into buf: inout [UInt8]) {
-        // This fiddling is because `Int` is the thing that's the same size as a pointer.
-        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
-        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+        writeInt(&buf, lower(value))
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-public func FfiConverterTypeMediatorSession_lift(_ pointer: UnsafeMutableRawPointer) throws -> MediatorSession {
-    return try FfiConverterTypeMediatorSession.lift(pointer)
+public func FfiConverterTypeMediatorSession_lift(_ handle: UInt64) throws -> MediatorSession {
+    return try FfiConverterTypeMediatorSession.lift(handle)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-public func FfiConverterTypeMediatorSession_lower(_ value: MediatorSession) -> UnsafeMutableRawPointer {
+public func FfiConverterTypeMediatorSession_lower(_ value: MediatorSession) -> UInt64 {
     return FfiConverterTypeMediatorSession.lower(value)
 }
+
+
+
+
+
 
 /**
  * A live TSP session to a mediator, scoped to one holder identity.
  */
-public protocol TspMediatorSessionProtocol: AnyObject {
-    /**
-     * Announce this holder's TSP reachability to `vta_did` (routed through
-     * `mediator_did`) so the VTA's device-push prefers TSP for this device
-     * (learn-from-inbound). Sends a session-less ping frame; the VTA records
-     * our proven DID and replies with a pong that `receive_next` harmlessly
-     * ignores. Call right after connecting the inbox, and periodically, so the
-     * VTA's reachability record for this device stays fresh.
-     */
-    func announce(vtaDid: String, mediatorDid: String) async throws
-
+public protocol TspMediatorSessionProtocol: AnyObject, Sendable {
+    
     /**
      * Wait up to `timeout_secs` for the next inbound TSP message from the
      * mediator. Returns the unpacked Trust-Task document as JSON — the phone
@@ -1034,17 +1185,26 @@ public protocol TspMediatorSessionProtocol: AnyObject {
      * document directly rather than inside a DIDComm envelope's `body`. Returns
      * `None` if nothing arrived within the timeout. Call again to keep polling.
      */
-    func receiveNext(timeoutSecs: UInt64) async throws -> String?
-
+    func receiveNext(timeoutSecs: UInt64) async throws  -> String?
+    
     /**
      * Submit an already-signed Trust Task document to `vta_did`, routed through
-     * `mediator_did`. TSP carries the document bytes directly — no DIDComm
+     * `mediator_did`. The SDK seals the document in the TSP binding envelope
+     * (`vta_sdk::tsp_binding`) — no DIDComm
      * envelope — so the VTA's `tsp_inbound::dispatch_one` hands the payload
      * straight to the same `dispatch_trust_task_core` that backs
      * `POST /api/trust-tasks`.
      *
-     * **No bearer token.** TSP proves the sender, and the VTA derives
-     * authorization from that sealed `sender_vid` (intrinsic-sender auth).
+     * **The document authenticates the request, not the transport.** The VTA
+     * accepts it only when its Data Integrity proof verifies as its `issuer`
+     * and that issuer is the sealed `sender_vid`. So the document must be
+     * signed by this session's holder, name it as `issuer` and name `vta_did`
+     * as `recipient`; anything else is refused before it is sent
+     * ([`crate::reply::require_signed_request`]). There is no bearer token.
+     *
+     * **The reply must be verified by the caller** once it has correlated it,
+     * with [`crate::reply::verify_trust_task_reply`] — it arrives on the inbox,
+     * not here.
      *
      * **Fire-and-forget, unlike the DIDComm
      * [`send_trust_task`](crate::mediator::MediatorSession::send_trust_task).**
@@ -1058,66 +1218,68 @@ public protocol TspMediatorSessionProtocol: AnyObject {
      * Sending itself takes no socket lock, so this *is* safe to call while
      * that loop is blocked in `receive_next`.
      */
-    func sendTrustTask(vtaDid: String, mediatorDid: String, docJson: String) async throws
-
+    func sendTrustTask(vtaDid: String, mediatorDid: String, docJson: String) async throws 
+    
     /**
      * Gracefully close the mediator connection (the TSP websocket).
      */
-    func shutdown() async
+    func shutdown() async 
+    
 }
-
 /**
  * A live TSP session to a mediator, scoped to one holder identity.
  */
-open class TspMediatorSession:
-    TspMediatorSessionProtocol
-{
-    fileprivate let pointer: UnsafeMutableRawPointer!
+open class TspMediatorSession: TspMediatorSessionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
 
-    // Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public struct NoPointer {
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
         public init() {}
     }
 
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
-    public required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
-        self.pointer = pointer
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
     }
 
     // This constructor can be used to instantiate a fake object.
-    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
     //
     // - Warning:
-    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public init(noPointer _: NoPointer) {
-        pointer = nil
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
-        return try! rustCall { uniffi_vta_mobile_core_fn_clone_tspmediatorsession(self.pointer, $0) }
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_vta_mobile_core_fn_clone_tspmediatorsession(self.handle, $0) }
     }
-
     // No primary constructor declared for this class.
 
     deinit {
-        guard let pointer = pointer else {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
             return
         }
 
-        try! rustCall { uniffi_vta_mobile_core_fn_free_tspmediatorsession(pointer, $0) }
+        try! rustCall { uniffi_vta_mobile_core_fn_free_tspmediatorsession(handle, $0) }
     }
 
+    
     /**
      * Connect the holder's TSP websocket to `mediator_did` and open delivery.
      *
@@ -1133,45 +1295,46 @@ open class TspMediatorSession:
      * delivers to this holder and doesn't gate on a conversing peer. The peer
      * DID becomes relevant only for the reply/send path.
      */
-    public static func connect(holderDid: String, holderSigningPrivateEd25519: Data, mediatorDid: String) async throws -> TspMediatorSession {
-        return
-            try await uniffiRustCallAsync(
-                rustFutureFunc: {
-                    uniffi_vta_mobile_core_fn_constructor_tspmediatorsession_connect(FfiConverterString.lower(holderDid), FfiConverterData.lower(holderSigningPrivateEd25519), FfiConverterString.lower(mediatorDid))
-                },
-                pollFunc: ffi_vta_mobile_core_rust_future_poll_pointer,
-                completeFunc: ffi_vta_mobile_core_rust_future_complete_pointer,
-                freeFunc: ffi_vta_mobile_core_rust_future_free_pointer,
-                liftFunc: FfiConverterTypeTspMediatorSession.lift,
-                errorHandler: FfiConverterTypeFfiError.lift
-            )
-    }
-
+public static func connect(holderDid: String, holderSigningPrivateEd25519: Data, mediatorDid: String)async throws  -> TspMediatorSession  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_constructor_tspmediatorsession_connect(FfiConverterString.lower(holderDid),FfiConverterData.lower(holderSigningPrivateEd25519),FfiConverterString.lower(mediatorDid)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_u64,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_u64,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_u64,
+            liftFunc: FfiConverterTypeTspMediatorSession_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
     /**
-     * Announce this holder's TSP reachability to `vta_did` (routed through
-     * `mediator_did`) so the VTA's device-push prefers TSP for this device
-     * (learn-from-inbound). Sends a session-less ping frame; the VTA records
-     * our proven DID and replies with a pong that `receive_next` harmlessly
-     * ignores. Call right after connecting the inbox, and periodically, so the
-     * VTA's reachability record for this device stays fresh.
+     * Connect the TSP websocket as a holder that is **not** a `did:key`, with its secrets
+     * given one per verification method — the TSP counterpart to
+     * [`MediatorSession::connect_with_secrets`](crate::mediator::MediatorSession::connect_with_secrets),
+     * for a `did:peer:2` relationship DID carrying witness documents ([`crate::witness`]).
+     * The secrets are checked against the resolved document before any socket opens
+     * ([`crate::holder_secrets`]).
      */
-    open func announce(vtaDid: String, mediatorDid: String) async throws {
-        return
-            try await uniffiRustCallAsync(
-                rustFutureFunc: {
-                    uniffi_vta_mobile_core_fn_method_tspmediatorsession_announce(
-                        self.uniffiClonePointer(),
-                        FfiConverterString.lower(vtaDid), FfiConverterString.lower(mediatorDid)
-                    )
-                },
-                pollFunc: ffi_vta_mobile_core_rust_future_poll_void,
-                completeFunc: ffi_vta_mobile_core_rust_future_complete_void,
-                freeFunc: ffi_vta_mobile_core_rust_future_free_void,
-                liftFunc: { $0 },
-                errorHandler: FfiConverterTypeFfiError.lift
-            )
-    }
+public static func connectWithSecrets(holderDid: String, secrets: [HolderSecret], mediatorDid: String)async throws  -> TspMediatorSession  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_constructor_tspmediatorsession_connect_with_secrets(FfiConverterString.lower(holderDid),FfiConverterSequenceTypeHolderSecret.lower(secrets),FfiConverterString.lower(mediatorDid)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_u64,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_u64,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_u64,
+            liftFunc: FfiConverterTypeTspMediatorSession_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
 
+    
     /**
      * Wait up to `timeout_secs` for the next inbound TSP message from the
      * mediator. Returns the unpacked Trust-Task document as JSON — the phone
@@ -1180,32 +1343,40 @@ open class TspMediatorSession:
      * document directly rather than inside a DIDComm envelope's `body`. Returns
      * `None` if nothing arrived within the timeout. Call again to keep polling.
      */
-    open func receiveNext(timeoutSecs: UInt64) async throws -> String? {
-        return
-            try await uniffiRustCallAsync(
-                rustFutureFunc: {
-                    uniffi_vta_mobile_core_fn_method_tspmediatorsession_receive_next(
-                        self.uniffiClonePointer(),
-                        FfiConverterUInt64.lower(timeoutSecs)
-                    )
-                },
-                pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
-                completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
-                freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
-                liftFunc: FfiConverterOptionString.lift,
-                errorHandler: FfiConverterTypeFfiError.lift
-            )
-    }
-
+open func receiveNext(timeoutSecs: UInt64)async throws  -> String?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_method_tspmediatorsession_receive_next(
+                        self.uniffiCloneHandle(),FfiConverterUInt64.lower(timeoutSecs)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionString.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
     /**
      * Submit an already-signed Trust Task document to `vta_did`, routed through
-     * `mediator_did`. TSP carries the document bytes directly — no DIDComm
+     * `mediator_did`. The SDK seals the document in the TSP binding envelope
+     * (`vta_sdk::tsp_binding`) — no DIDComm
      * envelope — so the VTA's `tsp_inbound::dispatch_one` hands the payload
      * straight to the same `dispatch_trust_task_core` that backs
      * `POST /api/trust-tasks`.
      *
-     * **No bearer token.** TSP proves the sender, and the VTA derives
-     * authorization from that sealed `sender_vid` (intrinsic-sender auth).
+     * **The document authenticates the request, not the transport.** The VTA
+     * accepts it only when its Data Integrity proof verifies as its `issuer`
+     * and that issuer is the sealed `sender_vid`. So the document must be
+     * signed by this session's holder, name it as `issuer` and name `vta_did`
+     * as `recipient`; anything else is refused before it is sent
+     * ([`crate::reply::require_signed_request`]). There is no bearer token.
+     *
+     * **The reply must be verified by the caller** once it has correlated it,
+     * with [`crate::reply::verify_trust_task_reply`] — it arrives on the inbox,
+     * not here.
      *
      * **Fire-and-forget, unlike the DIDComm
      * [`send_trust_task`](crate::mediator::MediatorSession::send_trust_task).**
@@ -1219,89 +1390,89 @@ open class TspMediatorSession:
      * Sending itself takes no socket lock, so this *is* safe to call while
      * that loop is blocked in `receive_next`.
      */
-    open func sendTrustTask(vtaDid: String, mediatorDid: String, docJson: String) async throws {
-        return
-            try await uniffiRustCallAsync(
-                rustFutureFunc: {
-                    uniffi_vta_mobile_core_fn_method_tspmediatorsession_send_trust_task(
-                        self.uniffiClonePointer(),
-                        FfiConverterString.lower(vtaDid), FfiConverterString.lower(mediatorDid), FfiConverterString.lower(docJson)
-                    )
-                },
-                pollFunc: ffi_vta_mobile_core_rust_future_poll_void,
-                completeFunc: ffi_vta_mobile_core_rust_future_complete_void,
-                freeFunc: ffi_vta_mobile_core_rust_future_free_void,
-                liftFunc: { $0 },
-                errorHandler: FfiConverterTypeFfiError.lift
-            )
-    }
-
+open func sendTrustTask(vtaDid: String, mediatorDid: String, docJson: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_method_tspmediatorsession_send_trust_task(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(vtaDid),FfiConverterString.lower(mediatorDid),FfiConverterString.lower(docJson)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_void,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_void,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
     /**
      * Gracefully close the mediator connection (the TSP websocket).
      */
-    open func shutdown() async {
-        return
-            try! await uniffiRustCallAsync(
-                rustFutureFunc: {
-                    uniffi_vta_mobile_core_fn_method_tspmediatorsession_shutdown(
-                        self.uniffiClonePointer()
-                    )
-                },
-                pollFunc: ffi_vta_mobile_core_rust_future_poll_void,
-                completeFunc: ffi_vta_mobile_core_rust_future_complete_void,
-                freeFunc: ffi_vta_mobile_core_rust_future_free_void,
-                liftFunc: { $0 },
-                errorHandler: nil
-            )
-    }
+open func shutdown()async   {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_method_tspmediatorsession_shutdown(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_void,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_void,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: nil
+            
+        )
+}
+    
+
+    
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeTspMediatorSession: FfiConverter {
-    typealias FfiType = UnsafeMutableRawPointer
+    typealias FfiType = UInt64
     typealias SwiftType = TspMediatorSession
 
-    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> TspMediatorSession {
-        return TspMediatorSession(unsafeFromRawPointer: pointer)
+    public static func lift(_ handle: UInt64) throws -> TspMediatorSession {
+        return TspMediatorSession(unsafeFromHandle: handle)
     }
 
-    public static func lower(_ value: TspMediatorSession) -> UnsafeMutableRawPointer {
-        return value.uniffiClonePointer()
+    public static func lower(_ value: TspMediatorSession) -> UInt64 {
+        return value.uniffiCloneHandle()
     }
 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TspMediatorSession {
-        let v: UInt64 = try readInt(&buf)
-        // The Rust code won't compile if a pointer won't fit in a UInt64.
-        // We have to go via `UInt` because that's the thing that's the size of a pointer.
-        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
-        if ptr == nil {
-            throw UniffiInternalError.unexpectedNullPointer
-        }
-        return try lift(ptr!)
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
     }
 
     public static func write(_ value: TspMediatorSession, into buf: inout [UInt8]) {
-        // This fiddling is because `Int` is the thing that's the same size as a pointer.
-        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
-        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+        writeInt(&buf, lower(value))
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-public func FfiConverterTypeTspMediatorSession_lift(_ pointer: UnsafeMutableRawPointer) throws -> TspMediatorSession {
-    return try FfiConverterTypeTspMediatorSession.lift(pointer)
+public func FfiConverterTypeTspMediatorSession_lift(_ handle: UInt64) throws -> TspMediatorSession {
+    return try FfiConverterTypeTspMediatorSession.lift(handle)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-public func FfiConverterTypeTspMediatorSession_lower(_ value: TspMediatorSession) -> UnsafeMutableRawPointer {
+public func FfiConverterTypeTspMediatorSession_lower(_ value: TspMediatorSession) -> UInt64 {
     return FfiConverterTypeTspMediatorSession.lower(value)
 }
+
+
+
 
 /**
  * A name to show for a DID, plus the provenance the UI must not throw away.
@@ -1311,7 +1482,7 @@ public func FfiConverterTypeTspMediatorSession_lower(_ value: TspMediatorSession
  * see — but the app must qualify it (see `DisplayName.rendered` on the Swift
  * side, which appends `[unverified]`). Never render `name` alone.
  */
-public struct AgentName {
+public struct AgentName: Equatable, Hashable {
     /**
      * The claimed name, e.g. `example.com/@treasury`.
      */
@@ -1321,48 +1492,38 @@ public struct AgentName {
      */
     public var verified: Bool
 
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
     public init(
-        /* 
+        /**
          * The claimed name, e.g. `example.com/@treasury`.
-         */ name: String,
-        /* 
-            * Whether the claim round-tripped back to this DID.
-            */ verified: Bool
-    ) {
+         */name: String, 
+        /**
+         * Whether the claim round-tripped back to this DID.
+         */verified: Bool) {
         self.name = name
         self.verified = verified
     }
+
+    
+
+    
 }
 
-extension AgentName: Equatable, Hashable {
-    public static func == (lhs: AgentName, rhs: AgentName) -> Bool {
-        if lhs.name != rhs.name {
-            return false
-        }
-        if lhs.verified != rhs.verified {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(name)
-        hasher.combine(verified)
-    }
-}
+#if compiler(>=6)
+extension AgentName: Sendable {}
+#endif
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeAgentName: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AgentName {
         return
             try AgentName(
-                name: FfiConverterString.read(from: &buf),
+                name: FfiConverterString.read(from: &buf), 
                 verified: FfiConverterBool.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: AgentName, into buf: inout [UInt8]) {
@@ -1371,26 +1532,28 @@ public struct FfiConverterTypeAgentName: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeAgentName_lift(_ buf: RustBuffer) throws -> AgentName {
     return try FfiConverterTypeAgentName.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeAgentName_lower(_ value: AgentName) -> RustBuffer {
     return FfiConverterTypeAgentName.lower(value)
 }
+
 
 /**
  * The envelope + echo fields for an approve-response. `id` and `issued_at` are
  * supplied by the native layer (which owns identifiers and the clock), keeping
  * these builders pure and deterministic.
  */
-public struct ApproveResponseDraft {
+public struct ApproveResponseDraft: Equatable, Hashable {
     /**
      * Document id (e.g. a fresh UUID).
      */
@@ -1411,6 +1574,11 @@ public struct ApproveResponseDraft {
      * Echoed verbatim from the request.
      */
     public var subject: String
+    /**
+     * Echoed verbatim from the request; empty when the request carried none
+     * (a bound approval may have no session), in which case the response
+     * carries none either.
+     */
     public var sessionId: String
     /**
      * The step-up challenge; the gate signs/binds over it.
@@ -1421,31 +1589,35 @@ public struct ApproveResponseDraft {
      */
     public var grantedAcr: String?
 
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
     public init(
-        /* 
+        /**
          * Document id (e.g. a fresh UUID).
-         */ id: String,
-        /* 
-            * The approver's DID (document `issuer`).
-            */ issuerDid: String,
-        /* 
-            * The relying party's DID (document `recipient`).
-            */ recipientDid: String,
-        /* 
-            * RFC 3339 timestamp for `issuedAt` (and the proof's `created`).
-            */ issuedAt: String,
-        /* 
-            * Echoed verbatim from the request.
-            */ subject: String, sessionId: String,
-        /* 
-            * The step-up challenge; the gate signs/binds over it.
-            */ challenge: String,
-        /* 
-            * The acr the approver believes it demonstrated (e.g. `"aal2"`).
-            */ grantedAcr: String?
-    ) {
+         */id: String, 
+        /**
+         * The approver's DID (document `issuer`).
+         */issuerDid: String, 
+        /**
+         * The relying party's DID (document `recipient`).
+         */recipientDid: String, 
+        /**
+         * RFC 3339 timestamp for `issuedAt` (and the proof's `created`).
+         */issuedAt: String, 
+        /**
+         * Echoed verbatim from the request.
+         */subject: String, 
+        /**
+         * Echoed verbatim from the request; empty when the request carried none
+         * (a bound approval may have no session), in which case the response
+         * carries none either.
+         */sessionId: String, 
+        /**
+         * The step-up challenge; the gate signs/binds over it.
+         */challenge: String, 
+        /**
+         * The acr the approver believes it demonstrated (e.g. `"aal2"`).
+         */grantedAcr: String?) {
         self.id = id
         self.issuerDid = issuerDid
         self.recipientDid = recipientDid
@@ -1455,65 +1627,32 @@ public struct ApproveResponseDraft {
         self.challenge = challenge
         self.grantedAcr = grantedAcr
     }
+
+    
+
+    
 }
 
-extension ApproveResponseDraft: Equatable, Hashable {
-    public static func == (lhs: ApproveResponseDraft, rhs: ApproveResponseDraft) -> Bool {
-        if lhs.id != rhs.id {
-            return false
-        }
-        if lhs.issuerDid != rhs.issuerDid {
-            return false
-        }
-        if lhs.recipientDid != rhs.recipientDid {
-            return false
-        }
-        if lhs.issuedAt != rhs.issuedAt {
-            return false
-        }
-        if lhs.subject != rhs.subject {
-            return false
-        }
-        if lhs.sessionId != rhs.sessionId {
-            return false
-        }
-        if lhs.challenge != rhs.challenge {
-            return false
-        }
-        if lhs.grantedAcr != rhs.grantedAcr {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(issuerDid)
-        hasher.combine(recipientDid)
-        hasher.combine(issuedAt)
-        hasher.combine(subject)
-        hasher.combine(sessionId)
-        hasher.combine(challenge)
-        hasher.combine(grantedAcr)
-    }
-}
+#if compiler(>=6)
+extension ApproveResponseDraft: Sendable {}
+#endif
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeApproveResponseDraft: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ApproveResponseDraft {
         return
             try ApproveResponseDraft(
-                id: FfiConverterString.read(from: &buf),
-                issuerDid: FfiConverterString.read(from: &buf),
-                recipientDid: FfiConverterString.read(from: &buf),
-                issuedAt: FfiConverterString.read(from: &buf),
-                subject: FfiConverterString.read(from: &buf),
-                sessionId: FfiConverterString.read(from: &buf),
-                challenge: FfiConverterString.read(from: &buf),
+                id: FfiConverterString.read(from: &buf), 
+                issuerDid: FfiConverterString.read(from: &buf), 
+                recipientDid: FfiConverterString.read(from: &buf), 
+                issuedAt: FfiConverterString.read(from: &buf), 
+                subject: FfiConverterString.read(from: &buf), 
+                sessionId: FfiConverterString.read(from: &buf), 
+                challenge: FfiConverterString.read(from: &buf), 
                 grantedAcr: FfiConverterOptionString.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: ApproveResponseDraft, into buf: inout [UInt8]) {
@@ -1528,69 +1667,58 @@ public struct FfiConverterTypeApproveResponseDraft: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeApproveResponseDraft_lift(_ buf: RustBuffer) throws -> ApproveResponseDraft {
     return try FfiConverterTypeApproveResponseDraft.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeApproveResponseDraft_lower(_ value: ApproveResponseDraft) -> RustBuffer {
     return FfiConverterTypeApproveResponseDraft.lower(value)
 }
 
+
 /**
  * Parsed `auth/challenge` response.
  */
-public struct AuthChallenge {
+public struct AuthChallenge: Equatable, Hashable {
     public var challenge: String
     public var sessionId: String
     public var expiresAt: String
 
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
     public init(challenge: String, sessionId: String, expiresAt: String) {
         self.challenge = challenge
         self.sessionId = sessionId
         self.expiresAt = expiresAt
     }
+
+    
+
+    
 }
 
-extension AuthChallenge: Equatable, Hashable {
-    public static func == (lhs: AuthChallenge, rhs: AuthChallenge) -> Bool {
-        if lhs.challenge != rhs.challenge {
-            return false
-        }
-        if lhs.sessionId != rhs.sessionId {
-            return false
-        }
-        if lhs.expiresAt != rhs.expiresAt {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(challenge)
-        hasher.combine(sessionId)
-        hasher.combine(expiresAt)
-    }
-}
+#if compiler(>=6)
+extension AuthChallenge: Sendable {}
+#endif
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeAuthChallenge: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AuthChallenge {
         return
             try AuthChallenge(
-                challenge: FfiConverterString.read(from: &buf),
-                sessionId: FfiConverterString.read(from: &buf),
+                challenge: FfiConverterString.read(from: &buf), 
+                sessionId: FfiConverterString.read(from: &buf), 
                 expiresAt: FfiConverterString.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: AuthChallenge, into buf: inout [UInt8]) {
@@ -1600,25 +1728,27 @@ public struct FfiConverterTypeAuthChallenge: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeAuthChallenge_lift(_ buf: RustBuffer) throws -> AuthChallenge {
     return try FfiConverterTypeAuthChallenge.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeAuthChallenge_lower(_ value: AuthChallenge) -> RustBuffer {
     return FfiConverterTypeAuthChallenge.lower(value)
 }
 
+
 /**
  * Envelope fields shared by the auth request documents. `id` / `issued_at` are
  * supplied by the native layer (it owns identifiers and the clock).
  */
-public struct AuthEnvelope {
+public struct AuthEnvelope: Equatable, Hashable {
     /**
      * Document id (e.g. a fresh UUID).
      */
@@ -1636,66 +1766,48 @@ public struct AuthEnvelope {
      */
     public var issuedAt: String
 
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
     public init(
-        /* 
+        /**
          * Document id (e.g. a fresh UUID).
-         */ id: String,
-        /* 
-            * The holder DID — the subject authenticating (document `issuer`).
-            */ holderDid: String,
-        /* 
-            * The VTA / auth-service DID (document `recipient`).
-            */ vtaDid: String,
-        /* 
-            * RFC 3339 timestamp for `issuedAt` (and the authenticate proof's `created`).
-            */ issuedAt: String
-    ) {
+         */id: String, 
+        /**
+         * The holder DID — the subject authenticating (document `issuer`).
+         */holderDid: String, 
+        /**
+         * The VTA / auth-service DID (document `recipient`).
+         */vtaDid: String, 
+        /**
+         * RFC 3339 timestamp for `issuedAt` (and the authenticate proof's `created`).
+         */issuedAt: String) {
         self.id = id
         self.holderDid = holderDid
         self.vtaDid = vtaDid
         self.issuedAt = issuedAt
     }
+
+    
+
+    
 }
 
-extension AuthEnvelope: Equatable, Hashable {
-    public static func == (lhs: AuthEnvelope, rhs: AuthEnvelope) -> Bool {
-        if lhs.id != rhs.id {
-            return false
-        }
-        if lhs.holderDid != rhs.holderDid {
-            return false
-        }
-        if lhs.vtaDid != rhs.vtaDid {
-            return false
-        }
-        if lhs.issuedAt != rhs.issuedAt {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(holderDid)
-        hasher.combine(vtaDid)
-        hasher.combine(issuedAt)
-    }
-}
+#if compiler(>=6)
+extension AuthEnvelope: Sendable {}
+#endif
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeAuthEnvelope: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AuthEnvelope {
         return
             try AuthEnvelope(
-                id: FfiConverterString.read(from: &buf),
-                holderDid: FfiConverterString.read(from: &buf),
-                vtaDid: FfiConverterString.read(from: &buf),
+                id: FfiConverterString.read(from: &buf), 
+                holderDid: FfiConverterString.read(from: &buf), 
+                vtaDid: FfiConverterString.read(from: &buf), 
                 issuedAt: FfiConverterString.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: AuthEnvelope, into buf: inout [UInt8]) {
@@ -1706,24 +1818,26 @@ public struct FfiConverterTypeAuthEnvelope: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeAuthEnvelope_lift(_ buf: RustBuffer) throws -> AuthEnvelope {
     return try FfiConverterTypeAuthEnvelope.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeAuthEnvelope_lower(_ value: AuthEnvelope) -> RustBuffer {
     return FfiConverterTypeAuthEnvelope.lower(value)
 }
 
+
 /**
  * Parsed token bundle (+ session summary) from an `authenticate` response.
  */
-public struct AuthTokens {
+public struct AuthTokens: Equatable, Hashable {
     public var accessToken: String
     /**
      * Token presentation scheme — almost always `"Bearer"`. The native layer
@@ -1742,20 +1856,19 @@ public struct AuthTokens {
      */
     public var amr: [String]
 
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(accessToken: String,
-                /* 
-                    * Token presentation scheme — almost always `"Bearer"`. The native layer
-                    * uses it as the `Authorization` header scheme.
-                    */ tokenType: String, expiresIn: UInt64, refreshToken: String?, refreshExpiresIn: UInt64?,
-                /* 
-                    * Authentication context class of the issued session (e.g. `"aal2"`).
-                    */ acr: String?,
-                /* 
-                    * Authentication methods references (e.g. `["did"]`).
-                    */ amr: [String])
-    {
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(accessToken: String, 
+        /**
+         * Token presentation scheme — almost always `"Bearer"`. The native layer
+         * uses it as the `Authorization` header scheme.
+         */tokenType: String, expiresIn: UInt64, refreshToken: String?, refreshExpiresIn: UInt64?, 
+        /**
+         * Authentication context class of the issued session (e.g. `"aal2"`).
+         */acr: String?, 
+        /**
+         * Authentication methods references (e.g. `["did"]`).
+         */amr: [String]) {
         self.accessToken = accessToken
         self.tokenType = tokenType
         self.expiresIn = expiresIn
@@ -1764,60 +1877,31 @@ public struct AuthTokens {
         self.acr = acr
         self.amr = amr
     }
+
+    
+
+    
 }
 
-extension AuthTokens: Equatable, Hashable {
-    public static func == (lhs: AuthTokens, rhs: AuthTokens) -> Bool {
-        if lhs.accessToken != rhs.accessToken {
-            return false
-        }
-        if lhs.tokenType != rhs.tokenType {
-            return false
-        }
-        if lhs.expiresIn != rhs.expiresIn {
-            return false
-        }
-        if lhs.refreshToken != rhs.refreshToken {
-            return false
-        }
-        if lhs.refreshExpiresIn != rhs.refreshExpiresIn {
-            return false
-        }
-        if lhs.acr != rhs.acr {
-            return false
-        }
-        if lhs.amr != rhs.amr {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(accessToken)
-        hasher.combine(tokenType)
-        hasher.combine(expiresIn)
-        hasher.combine(refreshToken)
-        hasher.combine(refreshExpiresIn)
-        hasher.combine(acr)
-        hasher.combine(amr)
-    }
-}
+#if compiler(>=6)
+extension AuthTokens: Sendable {}
+#endif
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeAuthTokens: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AuthTokens {
         return
             try AuthTokens(
-                accessToken: FfiConverterString.read(from: &buf),
-                tokenType: FfiConverterString.read(from: &buf),
-                expiresIn: FfiConverterUInt64.read(from: &buf),
-                refreshToken: FfiConverterOptionString.read(from: &buf),
-                refreshExpiresIn: FfiConverterOptionUInt64.read(from: &buf),
-                acr: FfiConverterOptionString.read(from: &buf),
+                accessToken: FfiConverterString.read(from: &buf), 
+                tokenType: FfiConverterString.read(from: &buf), 
+                expiresIn: FfiConverterUInt64.read(from: &buf), 
+                refreshToken: FfiConverterOptionString.read(from: &buf), 
+                refreshExpiresIn: FfiConverterOptionUInt64.read(from: &buf), 
+                acr: FfiConverterOptionString.read(from: &buf), 
                 amr: FfiConverterSequenceString.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: AuthTokens, into buf: inout [UInt8]) {
@@ -1831,25 +1915,206 @@ public struct FfiConverterTypeAuthTokens: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeAuthTokens_lift(_ buf: RustBuffer) throws -> AuthTokens {
     return try FfiConverterTypeAuthTokens.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeAuthTokens_lower(_ value: AuthTokens) -> RustBuffer {
     return FfiConverterTypeAuthTokens.lower(value)
 }
 
+
+/**
+ * The fields of a `consent/approve-request` the native consent UI needs.
+ *
+ * Every one of these comes out of the **verified** document. That is not a
+ * stylistic preference: the prompt asks a person to let an agent read a
+ * conversation, and a renderer that took the conversation's label from the
+ * raw JSON while taking the agent's DID from the verified copy would be
+ * showing a sentence that no single signer ever asserted.
+ */
+public struct ConsentRequest: Equatable, Hashable {
+    /**
+     * The **proven** signer of the document's proof, guaranteed to be in the
+     * caller's enrolled-executor allowlist.
+     */
+    public var issuer: String
+    /**
+     * DID of the agent the decision is about. Consent is granted to one agent
+     * rather than to the service hosting it, so this is the identity the
+     * approver is deciding about and the one a later revocation names.
+     */
+    public var agent: String
+    /**
+     * Messaging platform the conversation lives on, as the bridge names it.
+     */
+    public var platform: String
+    /**
+     * The bridge's opaque handle for the conversation. Deliberately not a
+     * phone number or a group link: it exists so a decision can be matched to
+     * a conversation without the matching key being personal data.
+     */
+    public var conversationRef: String
+    /**
+     * `dm`, `group`, … — how the conversation is shaped.
+     */
+    public var kind: String
+    /**
+     * What is being asked for: `receive` or `converse`.
+     */
+    public var scope: String
+    /**
+     * Single-use value the approver's decision MUST echo. Without it a
+     * decision is a free-floating assertion that cannot be shown to answer
+     * *this* prompt rather than an earlier one.
+     */
+    public var challenge: String
+    /**
+     * Human-readable label for the conversation — "Signal group 'Family'".
+     *
+     * **Chosen by the requesting party, so the native layer MUST treat it as
+     * untrusted text**: escape it, bound its length, and never let it displace
+     * `agent` / `platform` / `conversation_ref` as the basis of the decision.
+     * It is here because `conversation_ref` is opaque by design, and an
+     * approver asked to decide about an identifier that means nothing to them
+     * will either always allow or always deny.
+     */
+    public var displayHint: String?
+    /**
+     * Digest of the message that prompted this request, when there is one, so
+     * an approver deciding a `receive` scope can confirm a real message is
+     * arriving. A digest rather than the content: showing the message in order
+     * to ask would disclose the very thing the decision gates.
+     */
+    public var firstMessageDigest: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The **proven** signer of the document's proof, guaranteed to be in the
+         * caller's enrolled-executor allowlist.
+         */issuer: String, 
+        /**
+         * DID of the agent the decision is about. Consent is granted to one agent
+         * rather than to the service hosting it, so this is the identity the
+         * approver is deciding about and the one a later revocation names.
+         */agent: String, 
+        /**
+         * Messaging platform the conversation lives on, as the bridge names it.
+         */platform: String, 
+        /**
+         * The bridge's opaque handle for the conversation. Deliberately not a
+         * phone number or a group link: it exists so a decision can be matched to
+         * a conversation without the matching key being personal data.
+         */conversationRef: String, 
+        /**
+         * `dm`, `group`, … — how the conversation is shaped.
+         */kind: String, 
+        /**
+         * What is being asked for: `receive` or `converse`.
+         */scope: String, 
+        /**
+         * Single-use value the approver's decision MUST echo. Without it a
+         * decision is a free-floating assertion that cannot be shown to answer
+         * *this* prompt rather than an earlier one.
+         */challenge: String, 
+        /**
+         * Human-readable label for the conversation — "Signal group 'Family'".
+         *
+         * **Chosen by the requesting party, so the native layer MUST treat it as
+         * untrusted text**: escape it, bound its length, and never let it displace
+         * `agent` / `platform` / `conversation_ref` as the basis of the decision.
+         * It is here because `conversation_ref` is opaque by design, and an
+         * approver asked to decide about an identifier that means nothing to them
+         * will either always allow or always deny.
+         */displayHint: String?, 
+        /**
+         * Digest of the message that prompted this request, when there is one, so
+         * an approver deciding a `receive` scope can confirm a real message is
+         * arriving. A digest rather than the content: showing the message in order
+         * to ask would disclose the very thing the decision gates.
+         */firstMessageDigest: String?) {
+        self.issuer = issuer
+        self.agent = agent
+        self.platform = platform
+        self.conversationRef = conversationRef
+        self.kind = kind
+        self.scope = scope
+        self.challenge = challenge
+        self.displayHint = displayHint
+        self.firstMessageDigest = firstMessageDigest
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ConsentRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeConsentRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ConsentRequest {
+        return
+            try ConsentRequest(
+                issuer: FfiConverterString.read(from: &buf), 
+                agent: FfiConverterString.read(from: &buf), 
+                platform: FfiConverterString.read(from: &buf), 
+                conversationRef: FfiConverterString.read(from: &buf), 
+                kind: FfiConverterString.read(from: &buf), 
+                scope: FfiConverterString.read(from: &buf), 
+                challenge: FfiConverterString.read(from: &buf), 
+                displayHint: FfiConverterOptionString.read(from: &buf), 
+                firstMessageDigest: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ConsentRequest, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.issuer, into: &buf)
+        FfiConverterString.write(value.agent, into: &buf)
+        FfiConverterString.write(value.platform, into: &buf)
+        FfiConverterString.write(value.conversationRef, into: &buf)
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterString.write(value.scope, into: &buf)
+        FfiConverterString.write(value.challenge, into: &buf)
+        FfiConverterOptionString.write(value.displayHint, into: &buf)
+        FfiConverterOptionString.write(value.firstMessageDigest, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeConsentRequest_lift(_ buf: RustBuffer) throws -> ConsentRequest {
+    return try FfiConverterTypeConsentRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeConsentRequest_lower(_ value: ConsentRequest) -> RustBuffer {
+    return FfiConverterTypeConsentRequest.lower(value)
+}
+
+
 /**
  * Engine build/version metadata. A trivial record so the host app can confirm
  * the FFI bridge is live and log which engine build it loaded.
  */
-public struct EngineInfo {
+public struct EngineInfo: Equatable, Hashable {
     /**
      * The `vta-mobile-core` crate version.
      */
@@ -1859,48 +2124,38 @@ public struct EngineInfo {
      */
     public var namespace: String
 
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
     public init(
-        /* 
+        /**
          * The `vta-mobile-core` crate version.
-         */ version: String,
-        /* 
-            * The UniFFI namespace (matches the generated Kotlin/Swift module).
-            */ namespace: String
-    ) {
+         */version: String, 
+        /**
+         * The UniFFI namespace (matches the generated Kotlin/Swift module).
+         */namespace: String) {
         self.version = version
         self.namespace = namespace
     }
+
+    
+
+    
 }
 
-extension EngineInfo: Equatable, Hashable {
-    public static func == (lhs: EngineInfo, rhs: EngineInfo) -> Bool {
-        if lhs.version != rhs.version {
-            return false
-        }
-        if lhs.namespace != rhs.namespace {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(version)
-        hasher.combine(namespace)
-    }
-}
+#if compiler(>=6)
+extension EngineInfo: Sendable {}
+#endif
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeEngineInfo: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EngineInfo {
         return
             try EngineInfo(
-                version: FfiConverterString.read(from: &buf),
+                version: FfiConverterString.read(from: &buf), 
                 namespace: FfiConverterString.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: EngineInfo, into buf: inout [UInt8]) {
@@ -1909,26 +2164,28 @@ public struct FfiConverterTypeEngineInfo: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeEngineInfo_lift(_ buf: RustBuffer) throws -> EngineInfo {
     return try FfiConverterTypeEngineInfo.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeEngineInfo_lower(_ value: EngineInfo) -> RustBuffer {
     return FfiConverterTypeEngineInfo.lower(value)
 }
+
 
 /**
  * Holder key material for a DIDComm session. **Tier-2 (software-held)** — see
  * the module docs. Native loads these from the keystore and SHOULD zeroize
  * them on session end.
  */
-public struct HolderKeys {
+public struct HolderKeys: Equatable, Hashable {
     /**
      * The holder DID (used as the authcrypt sender).
      */
@@ -1950,75 +2207,53 @@ public struct HolderKeys {
      */
     public var signingPrivateEd25519: Data
 
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
     public init(
-        /* 
+        /**
          * The holder DID (used as the authcrypt sender).
-         */ did: String,
-        /* 
-            * keyAgreement verification-method id (DID URL fragment).
-            */ keyAgreementKid: String,
-        /* 
-            * X25519 key-agreement private key (32 bytes).
-            */ keyAgreementPrivateX25519: Data,
-        /* 
-            * signing verification-method id.
-            */ signingKid: String,
-        /* 
-            * Ed25519 signing private key (32 bytes).
-            */ signingPrivateEd25519: Data
-    ) {
+         */did: String, 
+        /**
+         * keyAgreement verification-method id (DID URL fragment).
+         */keyAgreementKid: String, 
+        /**
+         * X25519 key-agreement private key (32 bytes).
+         */keyAgreementPrivateX25519: Data, 
+        /**
+         * signing verification-method id.
+         */signingKid: String, 
+        /**
+         * Ed25519 signing private key (32 bytes).
+         */signingPrivateEd25519: Data) {
         self.did = did
         self.keyAgreementKid = keyAgreementKid
         self.keyAgreementPrivateX25519 = keyAgreementPrivateX25519
         self.signingKid = signingKid
         self.signingPrivateEd25519 = signingPrivateEd25519
     }
+
+    
+
+    
 }
 
-extension HolderKeys: Equatable, Hashable {
-    public static func == (lhs: HolderKeys, rhs: HolderKeys) -> Bool {
-        if lhs.did != rhs.did {
-            return false
-        }
-        if lhs.keyAgreementKid != rhs.keyAgreementKid {
-            return false
-        }
-        if lhs.keyAgreementPrivateX25519 != rhs.keyAgreementPrivateX25519 {
-            return false
-        }
-        if lhs.signingKid != rhs.signingKid {
-            return false
-        }
-        if lhs.signingPrivateEd25519 != rhs.signingPrivateEd25519 {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(did)
-        hasher.combine(keyAgreementKid)
-        hasher.combine(keyAgreementPrivateX25519)
-        hasher.combine(signingKid)
-        hasher.combine(signingPrivateEd25519)
-    }
-}
+#if compiler(>=6)
+extension HolderKeys: Sendable {}
+#endif
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeHolderKeys: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HolderKeys {
         return
             try HolderKeys(
-                did: FfiConverterString.read(from: &buf),
-                keyAgreementKid: FfiConverterString.read(from: &buf),
-                keyAgreementPrivateX25519: FfiConverterData.read(from: &buf),
-                signingKid: FfiConverterString.read(from: &buf),
+                did: FfiConverterString.read(from: &buf), 
+                keyAgreementKid: FfiConverterString.read(from: &buf), 
+                keyAgreementPrivateX25519: FfiConverterData.read(from: &buf), 
+                signingKid: FfiConverterString.read(from: &buf), 
                 signingPrivateEd25519: FfiConverterData.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: HolderKeys, into buf: inout [UInt8]) {
@@ -2030,25 +2265,103 @@ public struct FfiConverterTypeHolderKeys: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeHolderKeys_lift(_ buf: RustBuffer) throws -> HolderKeys {
     return try FfiConverterTypeHolderKeys.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeHolderKeys_lower(_ value: HolderKeys) -> RustBuffer {
     return FfiConverterTypeHolderKeys.lower(value)
 }
 
+
+/**
+ * One private key of the holder, under the verification-method id it is published as.
+ *
+ * The shape of `vta_sdk::did_secrets::SecretEntry`, without the key type: the multicodec
+ * prefix of `private_key_multibase` is authoritative for it.
+ */
+public struct HolderSecret: Equatable, Hashable {
+    /**
+     * The verification method this key is published as — an absolute DID URL under the
+     * holder, e.g. `did:peer:2.Vz…#key-1`.
+     */
+    public var keyId: String
+    /**
+     * The private key, multibase (base58btc) with its multicodec prefix: `0x1300` Ed25519,
+     * `0x1302` X25519.
+     */
+    public var privateKeyMultibase: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The verification method this key is published as — an absolute DID URL under the
+         * holder, e.g. `did:peer:2.Vz…#key-1`.
+         */keyId: String, 
+        /**
+         * The private key, multibase (base58btc) with its multicodec prefix: `0x1300` Ed25519,
+         * `0x1302` X25519.
+         */privateKeyMultibase: String) {
+        self.keyId = keyId
+        self.privateKeyMultibase = privateKeyMultibase
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension HolderSecret: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHolderSecret: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HolderSecret {
+        return
+            try HolderSecret(
+                keyId: FfiConverterString.read(from: &buf), 
+                privateKeyMultibase: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HolderSecret, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.keyId, into: &buf)
+        FfiConverterString.write(value.privateKeyMultibase, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHolderSecret_lift(_ buf: RustBuffer) throws -> HolderSecret {
+    return try FfiConverterTypeHolderSecret.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHolderSecret_lower(_ value: HolderSecret) -> RustBuffer {
+    return FfiConverterTypeHolderSecret.lower(value)
+}
+
+
 /**
  * A resolved peer's public key-agreement key — e.g. from [`crate::resolver`].
  * Needed to authcrypt *to* the peer and to verify the peer's authcrypt.
  */
-public struct Peer {
+public struct Peer: Equatable, Hashable {
     public var did: String
     public var keyAgreementKid: String
     /**
@@ -2056,51 +2369,37 @@ public struct Peer {
      */
     public var keyAgreementPublicX25519: Data
 
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(did: String, keyAgreementKid: String,
-                /* 
-                    * X25519 key-agreement public key (32 bytes).
-                    */ keyAgreementPublicX25519: Data)
-    {
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(did: String, keyAgreementKid: String, 
+        /**
+         * X25519 key-agreement public key (32 bytes).
+         */keyAgreementPublicX25519: Data) {
         self.did = did
         self.keyAgreementKid = keyAgreementKid
         self.keyAgreementPublicX25519 = keyAgreementPublicX25519
     }
+
+    
+
+    
 }
 
-extension Peer: Equatable, Hashable {
-    public static func == (lhs: Peer, rhs: Peer) -> Bool {
-        if lhs.did != rhs.did {
-            return false
-        }
-        if lhs.keyAgreementKid != rhs.keyAgreementKid {
-            return false
-        }
-        if lhs.keyAgreementPublicX25519 != rhs.keyAgreementPublicX25519 {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(did)
-        hasher.combine(keyAgreementKid)
-        hasher.combine(keyAgreementPublicX25519)
-    }
-}
+#if compiler(>=6)
+extension Peer: Sendable {}
+#endif
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypePeer: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Peer {
         return
             try Peer(
-                did: FfiConverterString.read(from: &buf),
-                keyAgreementKid: FfiConverterString.read(from: &buf),
+                did: FfiConverterString.read(from: &buf), 
+                keyAgreementKid: FfiConverterString.read(from: &buf), 
                 keyAgreementPublicX25519: FfiConverterData.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: Peer, into buf: inout [UInt8]) {
@@ -2110,19 +2409,21 @@ public struct FfiConverterTypePeer: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypePeer_lift(_ buf: RustBuffer) throws -> Peer {
     return try FfiConverterTypePeer.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypePeer_lower(_ value: Peer) -> RustBuffer {
     return FfiConverterTypePeer.lower(value)
 }
+
 
 /**
  * Envelope fields the native layer supplies for a push / device Trust Task
@@ -2131,59 +2432,42 @@ public func FfiConverterTypePeer_lower(_ value: Peer) -> RustBuffer {
  * and a REST gateway is addressed by URL (no recipient DID); `device/set-wake`
  * sets both (issuer = device holder DID, recipient = the VTA DID).
  */
-public struct PushEnvelope {
+public struct PushEnvelope: Equatable, Hashable {
     public var id: String
     public var issuedAt: String
     public var issuer: String?
     public var recipient: String?
 
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
     public init(id: String, issuedAt: String, issuer: String?, recipient: String?) {
         self.id = id
         self.issuedAt = issuedAt
         self.issuer = issuer
         self.recipient = recipient
     }
+
+    
+
+    
 }
 
-extension PushEnvelope: Equatable, Hashable {
-    public static func == (lhs: PushEnvelope, rhs: PushEnvelope) -> Bool {
-        if lhs.id != rhs.id {
-            return false
-        }
-        if lhs.issuedAt != rhs.issuedAt {
-            return false
-        }
-        if lhs.issuer != rhs.issuer {
-            return false
-        }
-        if lhs.recipient != rhs.recipient {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(issuedAt)
-        hasher.combine(issuer)
-        hasher.combine(recipient)
-    }
-}
+#if compiler(>=6)
+extension PushEnvelope: Sendable {}
+#endif
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypePushEnvelope: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PushEnvelope {
         return
             try PushEnvelope(
-                id: FfiConverterString.read(from: &buf),
-                issuedAt: FfiConverterString.read(from: &buf),
-                issuer: FfiConverterOptionString.read(from: &buf),
+                id: FfiConverterString.read(from: &buf), 
+                issuedAt: FfiConverterString.read(from: &buf), 
+                issuer: FfiConverterOptionString.read(from: &buf), 
                 recipient: FfiConverterOptionString.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: PushEnvelope, into buf: inout [UInt8]) {
@@ -2194,19 +2478,21 @@ public struct FfiConverterTypePushEnvelope: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypePushEnvelope_lift(_ buf: RustBuffer) throws -> PushEnvelope {
     return try FfiConverterTypePushEnvelope.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypePushEnvelope_lower(_ value: PushEnvelope) -> RustBuffer {
     return FfiConverterTypePushEnvelope.lower(value)
 }
+
 
 /**
  * The auth service's view of the holder, from a `whoami` response — the full
@@ -2214,7 +2500,7 @@ public func FfiConverterTypePushEnvelope_lower(_ value: PushEnvelope) -> RustBuf
  * uses it to reconcile local AAL/authorization state after a step-up or policy
  * edit without re-issuing tokens.
  */
-public struct SessionInfo {
+public struct SessionInfo: Equatable, Hashable {
     /**
      * Opaque, server-chosen session id.
      */
@@ -2248,34 +2534,33 @@ public struct SessionInfo {
      */
     public var scopes: [String]
 
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
     public init(
-        /* 
+        /**
          * Opaque, server-chosen session id.
-         */ sessionId: String,
-        /* 
-            * The authenticated party's VID (typically a DID URL).
-            */ subject: String,
-        /* 
-            * RFC 3339 timestamp the session was created.
-            */ issuedAt: String,
-        /* 
-            * RFC 3339 timestamp the session ceases to be valid.
-            */ expiresAt: String,
-        /* 
-            * Authentication context class of the session (e.g. `"aal2"`).
-            */ acr: String?,
-        /* 
-            * Authentication methods references (e.g. `["did", "passkey"]`).
-            */ amr: [String],
-        /* 
-            * Role assignments the auth service holds for the holder.
-            */ roles: [String],
-        /* 
-            * Capability tags effective on the holder's current session.
-            */ scopes: [String]
-    ) {
+         */sessionId: String, 
+        /**
+         * The authenticated party's VID (typically a DID URL).
+         */subject: String, 
+        /**
+         * RFC 3339 timestamp the session was created.
+         */issuedAt: String, 
+        /**
+         * RFC 3339 timestamp the session ceases to be valid.
+         */expiresAt: String, 
+        /**
+         * Authentication context class of the session (e.g. `"aal2"`).
+         */acr: String?, 
+        /**
+         * Authentication methods references (e.g. `["did", "passkey"]`).
+         */amr: [String], 
+        /**
+         * Role assignments the auth service holds for the holder.
+         */roles: [String], 
+        /**
+         * Capability tags effective on the holder's current session.
+         */scopes: [String]) {
         self.sessionId = sessionId
         self.subject = subject
         self.issuedAt = issuedAt
@@ -2285,65 +2570,32 @@ public struct SessionInfo {
         self.roles = roles
         self.scopes = scopes
     }
+
+    
+
+    
 }
 
-extension SessionInfo: Equatable, Hashable {
-    public static func == (lhs: SessionInfo, rhs: SessionInfo) -> Bool {
-        if lhs.sessionId != rhs.sessionId {
-            return false
-        }
-        if lhs.subject != rhs.subject {
-            return false
-        }
-        if lhs.issuedAt != rhs.issuedAt {
-            return false
-        }
-        if lhs.expiresAt != rhs.expiresAt {
-            return false
-        }
-        if lhs.acr != rhs.acr {
-            return false
-        }
-        if lhs.amr != rhs.amr {
-            return false
-        }
-        if lhs.roles != rhs.roles {
-            return false
-        }
-        if lhs.scopes != rhs.scopes {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(sessionId)
-        hasher.combine(subject)
-        hasher.combine(issuedAt)
-        hasher.combine(expiresAt)
-        hasher.combine(acr)
-        hasher.combine(amr)
-        hasher.combine(roles)
-        hasher.combine(scopes)
-    }
-}
+#if compiler(>=6)
+extension SessionInfo: Sendable {}
+#endif
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeSessionInfo: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SessionInfo {
         return
             try SessionInfo(
-                sessionId: FfiConverterString.read(from: &buf),
-                subject: FfiConverterString.read(from: &buf),
-                issuedAt: FfiConverterString.read(from: &buf),
-                expiresAt: FfiConverterString.read(from: &buf),
-                acr: FfiConverterOptionString.read(from: &buf),
-                amr: FfiConverterSequenceString.read(from: &buf),
-                roles: FfiConverterSequenceString.read(from: &buf),
+                sessionId: FfiConverterString.read(from: &buf), 
+                subject: FfiConverterString.read(from: &buf), 
+                issuedAt: FfiConverterString.read(from: &buf), 
+                expiresAt: FfiConverterString.read(from: &buf), 
+                acr: FfiConverterOptionString.read(from: &buf), 
+                amr: FfiConverterSequenceString.read(from: &buf), 
+                roles: FfiConverterSequenceString.read(from: &buf), 
                 scopes: FfiConverterSequenceString.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: SessionInfo, into buf: inout [UInt8]) {
@@ -2358,64 +2610,57 @@ public struct FfiConverterTypeSessionInfo: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeSessionInfo_lift(_ buf: RustBuffer) throws -> SessionInfo {
     return try FfiConverterTypeSessionInfo.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeSessionInfo_lower(_ value: SessionInfo) -> RustBuffer {
     return FfiConverterTypeSessionInfo.lower(value)
 }
+
 
 /**
  * Outcome of a `device/set-wake` — whether the device now has a usable wake
  * channel, and the effective trigger allowlist the VTA provisioned (absent when
  * the channel was cleared).
  */
-public struct SetWakeOutcome {
+public struct SetWakeOutcome: Equatable, Hashable {
     public var pushCapable: Bool
     public var allowedTriggers: [String]?
 
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
     public init(pushCapable: Bool, allowedTriggers: [String]?) {
         self.pushCapable = pushCapable
         self.allowedTriggers = allowedTriggers
     }
+
+    
+
+    
 }
 
-extension SetWakeOutcome: Equatable, Hashable {
-    public static func == (lhs: SetWakeOutcome, rhs: SetWakeOutcome) -> Bool {
-        if lhs.pushCapable != rhs.pushCapable {
-            return false
-        }
-        if lhs.allowedTriggers != rhs.allowedTriggers {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(pushCapable)
-        hasher.combine(allowedTriggers)
-    }
-}
+#if compiler(>=6)
+extension SetWakeOutcome: Sendable {}
+#endif
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeSetWakeOutcome: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SetWakeOutcome {
         return
             try SetWakeOutcome(
-                pushCapable: FfiConverterBool.read(from: &buf),
+                pushCapable: FfiConverterBool.read(from: &buf), 
                 allowedTriggers: FfiConverterOptionSequenceString.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: SetWakeOutcome, into buf: inout [UInt8]) {
@@ -2424,25 +2669,27 @@ public struct FfiConverterTypeSetWakeOutcome: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeSetWakeOutcome_lift(_ buf: RustBuffer) throws -> SetWakeOutcome {
     return try FfiConverterTypeSetWakeOutcome.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeSetWakeOutcome_lower(_ value: SetWakeOutcome) -> RustBuffer {
     return FfiConverterTypeSetWakeOutcome.lower(value)
 }
 
+
 /**
  * The fields of an `auth/step-up/approve-request` the native consent UI needs
  * to display and to decide how to respond.
  */
-public struct StepUpRequest {
+public struct StepUpRequest: Equatable, Hashable {
     /**
      * The relying party that issued the request — the **proven** signer of the
      * document's Data Integrity proof, guaranteed to be in the caller's
@@ -2454,7 +2701,10 @@ public struct StepUpRequest {
      */
     public var subject: String
     /**
-     * Opaque session id; echoed back verbatim in the response.
+     * Opaque session id; echoed back verbatim in the response. Empty when the
+     * request names no session (0.5 makes `sessionId` optional: a step-up
+     * bound to one operation elevates none) — the same convention
+     * [`crate::stepup`]'s response draft reads, where empty means absent.
      */
     public var sessionId: String
     /**
@@ -2470,11 +2720,12 @@ public struct StepUpRequest {
      */
     public var targetAcr: String?
     /**
-     * Evidence gates the relying party will accept (`"did-signed"` /
-     * `"webauthn"`). Empty when the request did not constrain it (any
-     * supported kind is allowed). The `0.2` wire spelling `didSigned` is
-     * normalised to `did-signed`, so the native layer switches on one set of
-     * strings regardless of the request version.
+     * Evidence gates the relying party will accept, from the request's
+     * required `accepts`: `"did-signed"`, `"webauthn"`, or
+     * `"approver-signed"`. The wire's camelCase is normalised to the kebab
+     * form the native layers switch on; a kind they do not implement
+     * (`approver-signed`) is surfaced rather than dropped, so the UI can say
+     * it cannot answer instead of offering a gate the request did not list.
      */
     public var acceptableEvidence: [String]
     /**
@@ -2491,48 +2742,51 @@ public struct StepUpRequest {
      */
     public var authorizationContext: String?
 
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
     public init(
-        /* 
+        /**
          * The relying party that issued the request — the **proven** signer of the
          * document's Data Integrity proof, guaranteed to be in the caller's
          * enrolled-executor allowlist.
-         */ relyingParty: String,
-        /* 
-            * The VID whose session is being elevated.
-            */ subject: String,
-        /* 
-            * Opaque session id; echoed back verbatim in the response.
-            */ sessionId: String,
-        /* 
-            * base64url challenge the response must bind.
-            */ challenge: String,
-        /* 
-            * Human-readable reason — MUST be shown to the user verbatim for consent.
-            */ reason: String,
-        /* 
-            * The acr the relying party wants (e.g. `"aal2"`), if specified.
-            */ targetAcr: String?,
-        /* 
-            * Evidence gates the relying party will accept (`"did-signed"` /
-            * `"webauthn"`). Empty when the request did not constrain it (any
-            * supported kind is allowed). The `0.2` wire spelling `didSigned` is
-            * normalised to `did-signed`, so the native layer switches on one set of
-            * strings regardless of the request version.
-            */ acceptableEvidence: [String],
-        /* 
-            * Whether the request carried WebAuthn options — i.e. the relying party
-            * wants a passkey-backed elevation and supplied the ceremony parameters.
-            */ webauthnRequested: Bool,
-        /* 
-            * Structured authorization context (raw JSON), when the request carries one
-            * under the reverse-DNS `payload.ext` key `org.openvtc.authorization-context`
-            * — e.g. a Cierge cross-domain share / spend / tool ask. The native layer
-            * decodes and renders it as the approval card; absent for a plain
-            * login-elevation step-up (the UI falls back to `reason`).
-            */ authorizationContext: String?
-    ) {
+         */relyingParty: String, 
+        /**
+         * The VID whose session is being elevated.
+         */subject: String, 
+        /**
+         * Opaque session id; echoed back verbatim in the response. Empty when the
+         * request names no session (0.5 makes `sessionId` optional: a step-up
+         * bound to one operation elevates none) — the same convention
+         * [`crate::stepup`]'s response draft reads, where empty means absent.
+         */sessionId: String, 
+        /**
+         * base64url challenge the response must bind.
+         */challenge: String, 
+        /**
+         * Human-readable reason — MUST be shown to the user verbatim for consent.
+         */reason: String, 
+        /**
+         * The acr the relying party wants (e.g. `"aal2"`), if specified.
+         */targetAcr: String?, 
+        /**
+         * Evidence gates the relying party will accept, from the request's
+         * required `accepts`: `"did-signed"`, `"webauthn"`, or
+         * `"approver-signed"`. The wire's camelCase is normalised to the kebab
+         * form the native layers switch on; a kind they do not implement
+         * (`approver-signed`) is surfaced rather than dropped, so the UI can say
+         * it cannot answer instead of offering a gate the request did not list.
+         */acceptableEvidence: [String], 
+        /**
+         * Whether the request carried WebAuthn options — i.e. the relying party
+         * wants a passkey-backed elevation and supplied the ceremony parameters.
+         */webauthnRequested: Bool, 
+        /**
+         * Structured authorization context (raw JSON), when the request carries one
+         * under the reverse-DNS `payload.ext` key `org.openvtc.authorization-context`
+         * — e.g. a Cierge cross-domain share / spend / tool ask. The native layer
+         * decodes and renders it as the approval card; absent for a plain
+         * login-elevation step-up (the UI falls back to `reason`).
+         */authorizationContext: String?) {
         self.relyingParty = relyingParty
         self.subject = subject
         self.sessionId = sessionId
@@ -2543,70 +2797,33 @@ public struct StepUpRequest {
         self.webauthnRequested = webauthnRequested
         self.authorizationContext = authorizationContext
     }
+
+    
+
+    
 }
 
-extension StepUpRequest: Equatable, Hashable {
-    public static func == (lhs: StepUpRequest, rhs: StepUpRequest) -> Bool {
-        if lhs.relyingParty != rhs.relyingParty {
-            return false
-        }
-        if lhs.subject != rhs.subject {
-            return false
-        }
-        if lhs.sessionId != rhs.sessionId {
-            return false
-        }
-        if lhs.challenge != rhs.challenge {
-            return false
-        }
-        if lhs.reason != rhs.reason {
-            return false
-        }
-        if lhs.targetAcr != rhs.targetAcr {
-            return false
-        }
-        if lhs.acceptableEvidence != rhs.acceptableEvidence {
-            return false
-        }
-        if lhs.webauthnRequested != rhs.webauthnRequested {
-            return false
-        }
-        if lhs.authorizationContext != rhs.authorizationContext {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(relyingParty)
-        hasher.combine(subject)
-        hasher.combine(sessionId)
-        hasher.combine(challenge)
-        hasher.combine(reason)
-        hasher.combine(targetAcr)
-        hasher.combine(acceptableEvidence)
-        hasher.combine(webauthnRequested)
-        hasher.combine(authorizationContext)
-    }
-}
+#if compiler(>=6)
+extension StepUpRequest: Sendable {}
+#endif
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeStepUpRequest: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StepUpRequest {
         return
             try StepUpRequest(
-                relyingParty: FfiConverterString.read(from: &buf),
-                subject: FfiConverterString.read(from: &buf),
-                sessionId: FfiConverterString.read(from: &buf),
-                challenge: FfiConverterString.read(from: &buf),
-                reason: FfiConverterString.read(from: &buf),
-                targetAcr: FfiConverterOptionString.read(from: &buf),
-                acceptableEvidence: FfiConverterSequenceString.read(from: &buf),
-                webauthnRequested: FfiConverterBool.read(from: &buf),
+                relyingParty: FfiConverterString.read(from: &buf), 
+                subject: FfiConverterString.read(from: &buf), 
+                sessionId: FfiConverterString.read(from: &buf), 
+                challenge: FfiConverterString.read(from: &buf), 
+                reason: FfiConverterString.read(from: &buf), 
+                targetAcr: FfiConverterOptionString.read(from: &buf), 
+                acceptableEvidence: FfiConverterSequenceString.read(from: &buf), 
+                webauthnRequested: FfiConverterBool.read(from: &buf), 
                 authorizationContext: FfiConverterOptionString.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: StepUpRequest, into buf: inout [UInt8]) {
@@ -2622,25 +2839,27 @@ public struct FfiConverterTypeStepUpRequest: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeStepUpRequest_lift(_ buf: RustBuffer) throws -> StepUpRequest {
     return try FfiConverterTypeStepUpRequest.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeStepUpRequest_lower(_ value: StepUpRequest) -> RustBuffer {
     return FfiConverterTypeStepUpRequest.lower(value)
 }
 
+
 /**
  * The envelope + echo fields for a task-consent decision. `id` and `issued_at`
  * are supplied by the native layer, keeping the builder pure.
  */
-public struct TaskConsentDecisionDraft {
+public struct TaskConsentDecisionDraft: Equatable, Hashable {
     /**
      * Document id (e.g. a fresh UUID).
      */
@@ -2666,28 +2885,27 @@ public struct TaskConsentDecisionDraft {
      */
     public var payloadDigest: String
 
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
     public init(
-        /* 
+        /**
          * Document id (e.g. a fresh UUID).
-         */ id: String,
-        /* 
-            * The approver's DID (document `issuer`).
-            */ issuerDid: String,
-        /* 
-            * The VTA's DID (document `recipient`).
-            */ recipientDid: String,
-        /* 
-            * RFC 3339 timestamp for `issuedAt` and the proof's `created`.
-            */ issuedAt: String,
-        /* 
-            * Echoed verbatim from the request — binds this decision to that pending one.
-            */ challenge: String,
-        /* 
-            * Echoed verbatim from the request — the executor re-derives and matches it.
-            */ payloadDigest: String
-    ) {
+         */id: String, 
+        /**
+         * The approver's DID (document `issuer`).
+         */issuerDid: String, 
+        /**
+         * The VTA's DID (document `recipient`).
+         */recipientDid: String, 
+        /**
+         * RFC 3339 timestamp for `issuedAt` and the proof's `created`.
+         */issuedAt: String, 
+        /**
+         * Echoed verbatim from the request — binds this decision to that pending one.
+         */challenge: String, 
+        /**
+         * Echoed verbatim from the request — the executor re-derives and matches it.
+         */payloadDigest: String) {
         self.id = id
         self.issuerDid = issuerDid
         self.recipientDid = recipientDid
@@ -2695,55 +2913,30 @@ public struct TaskConsentDecisionDraft {
         self.challenge = challenge
         self.payloadDigest = payloadDigest
     }
+
+    
+
+    
 }
 
-extension TaskConsentDecisionDraft: Equatable, Hashable {
-    public static func == (lhs: TaskConsentDecisionDraft, rhs: TaskConsentDecisionDraft) -> Bool {
-        if lhs.id != rhs.id {
-            return false
-        }
-        if lhs.issuerDid != rhs.issuerDid {
-            return false
-        }
-        if lhs.recipientDid != rhs.recipientDid {
-            return false
-        }
-        if lhs.issuedAt != rhs.issuedAt {
-            return false
-        }
-        if lhs.challenge != rhs.challenge {
-            return false
-        }
-        if lhs.payloadDigest != rhs.payloadDigest {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(issuerDid)
-        hasher.combine(recipientDid)
-        hasher.combine(issuedAt)
-        hasher.combine(challenge)
-        hasher.combine(payloadDigest)
-    }
-}
+#if compiler(>=6)
+extension TaskConsentDecisionDraft: Sendable {}
+#endif
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeTaskConsentDecisionDraft: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TaskConsentDecisionDraft {
         return
             try TaskConsentDecisionDraft(
-                id: FfiConverterString.read(from: &buf),
-                issuerDid: FfiConverterString.read(from: &buf),
-                recipientDid: FfiConverterString.read(from: &buf),
-                issuedAt: FfiConverterString.read(from: &buf),
-                challenge: FfiConverterString.read(from: &buf),
+                id: FfiConverterString.read(from: &buf), 
+                issuerDid: FfiConverterString.read(from: &buf), 
+                recipientDid: FfiConverterString.read(from: &buf), 
+                issuedAt: FfiConverterString.read(from: &buf), 
+                challenge: FfiConverterString.read(from: &buf), 
                 payloadDigest: FfiConverterString.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: TaskConsentDecisionDraft, into buf: inout [UInt8]) {
@@ -2756,26 +2949,28 @@ public struct FfiConverterTypeTaskConsentDecisionDraft: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeTaskConsentDecisionDraft_lift(_ buf: RustBuffer) throws -> TaskConsentDecisionDraft {
     return try FfiConverterTypeTaskConsentDecisionDraft.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeTaskConsentDecisionDraft_lower(_ value: TaskConsentDecisionDraft) -> RustBuffer {
     return FfiConverterTypeTaskConsentDecisionDraft.lower(value)
 }
+
 
 /**
  * One consequence of executing the task, authored by the VTA by dry-running the
  * handler it is about to invoke. The `kind` set is OPEN — a surface MUST render
  * a kind it does not recognise (always show `summary`).
  */
-public struct TaskConsentEffect {
+public struct TaskConsentEffect: Equatable, Hashable {
     public var kind: String
     /**
      * Human-facing sentence — the one member always safe to render.
@@ -2788,66 +2983,44 @@ public struct TaskConsentEffect {
     public var before: String?
     public var after: String?
 
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(kind: String,
-                /* 
-                    * Human-facing sentence — the one member always safe to render.
-                    */ summary: String, path: String?,
-                /* 
-                    * Prior/resulting values as raw JSON strings, when present (for a diff).
-                    */ before: String?, after: String?)
-    {
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: String, 
+        /**
+         * Human-facing sentence — the one member always safe to render.
+         */summary: String, path: String?, 
+        /**
+         * Prior/resulting values as raw JSON strings, when present (for a diff).
+         */before: String?, after: String?) {
         self.kind = kind
         self.summary = summary
         self.path = path
         self.before = before
         self.after = after
     }
+
+    
+
+    
 }
 
-extension TaskConsentEffect: Equatable, Hashable {
-    public static func == (lhs: TaskConsentEffect, rhs: TaskConsentEffect) -> Bool {
-        if lhs.kind != rhs.kind {
-            return false
-        }
-        if lhs.summary != rhs.summary {
-            return false
-        }
-        if lhs.path != rhs.path {
-            return false
-        }
-        if lhs.before != rhs.before {
-            return false
-        }
-        if lhs.after != rhs.after {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(kind)
-        hasher.combine(summary)
-        hasher.combine(path)
-        hasher.combine(before)
-        hasher.combine(after)
-    }
-}
+#if compiler(>=6)
+extension TaskConsentEffect: Sendable {}
+#endif
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeTaskConsentEffect: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TaskConsentEffect {
         return
             try TaskConsentEffect(
-                kind: FfiConverterString.read(from: &buf),
-                summary: FfiConverterString.read(from: &buf),
-                path: FfiConverterOptionString.read(from: &buf),
-                before: FfiConverterOptionString.read(from: &buf),
+                kind: FfiConverterString.read(from: &buf), 
+                summary: FfiConverterString.read(from: &buf), 
+                path: FfiConverterOptionString.read(from: &buf), 
+                before: FfiConverterOptionString.read(from: &buf), 
                 after: FfiConverterOptionString.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: TaskConsentEffect, into buf: inout [UInt8]) {
@@ -2859,25 +3032,27 @@ public struct FfiConverterTypeTaskConsentEffect: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeTaskConsentEffect_lift(_ buf: RustBuffer) throws -> TaskConsentEffect {
     return try FfiConverterTypeTaskConsentEffect.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeTaskConsentEffect_lower(_ value: TaskConsentEffect) -> RustBuffer {
     return FfiConverterTypeTaskConsentEffect.lower(value)
 }
 
+
 /**
  * The `task-consent/request` fields the native approval UI needs to display and
  * to answer.
  */
-public struct TaskConsentRequest {
+public struct TaskConsentRequest: Equatable, Hashable {
     /**
      * The executor that issued the request — the **proven** signer of the
      * document's Data Integrity proof, guaranteed to be in the caller's
@@ -2950,65 +3125,64 @@ public struct TaskConsentRequest {
      */
     public var consequences: [String]
 
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
     public init(
-        /* 
+        /**
          * The executor that issued the request — the **proven** signer of the
          * document's Data Integrity proof, guaranteed to be in the caller's
          * enrolled-executor allowlist.
-         */ issuer: String,
-        /* 
-            * Nonce echoed + bound into the decision (never recomputed here).
-            */ challenge: String,
-        /* 
-            * The salted digest the decision echoes; the executor re-derives it from the
-            * payload it is about to run and refuses on mismatch.
-            */ payloadDigest: String,
-        /* 
-            * First chars of `payload_digest` — the code the operator matches against
-            * the requesting screen.
-            */ matchCode: String,
-        /* 
-            * Type URI of the task awaiting approval.
-            */ taskType: String,
-        /* 
-            * The DID that submitted the task.
-            */ requester: String,
-        /* 
-            * Named approver set the policy required.
-            */ approverSet: String?,
-        /* 
-            * Distinct approvals the policy requires.
-            */ minApprovals: UInt64,
-        /* 
-            * Integrity effect of executing: `none` | `mutating` | `destructive`.
-            */ sideEffects: String?,
-        /* 
-            * What executing discloses to the caller: `none` | `metadata` | `secret`.
-            */ discloses: String?,
-        /* 
-            * Whether the task acts with the subject's own authority.
-            */ actsAsSubject: Bool,
-        /* 
-            * What executing will do — the basis of the operator's decision. MAY be
-            * empty; fall back to `consequences`, and if both are empty the UI must say
-            * the consequences could not be determined (never render "no effects").
-            */ effects: [TaskConsentEffect],
-        /* 
-            * The identifier the task acts on, when known.
-            */ subject: String?,
-        /* 
-            * Browser-attested origin of the page that proposed the task, when present.
-            */ origin: String?,
-        /* 
-            * RFC 3339 expiry of the pending request, when present.
-            */ expiresAt: String?,
-        /* 
-            * The task specification's static fallback text, used when `effects` is
-            * empty because the VTA had no dry-run for this handler.
-            */ consequences: [String]
-    ) {
+         */issuer: String, 
+        /**
+         * Nonce echoed + bound into the decision (never recomputed here).
+         */challenge: String, 
+        /**
+         * The salted digest the decision echoes; the executor re-derives it from the
+         * payload it is about to run and refuses on mismatch.
+         */payloadDigest: String, 
+        /**
+         * First chars of `payload_digest` — the code the operator matches against
+         * the requesting screen.
+         */matchCode: String, 
+        /**
+         * Type URI of the task awaiting approval.
+         */taskType: String, 
+        /**
+         * The DID that submitted the task.
+         */requester: String, 
+        /**
+         * Named approver set the policy required.
+         */approverSet: String?, 
+        /**
+         * Distinct approvals the policy requires.
+         */minApprovals: UInt64, 
+        /**
+         * Integrity effect of executing: `none` | `mutating` | `destructive`.
+         */sideEffects: String?, 
+        /**
+         * What executing discloses to the caller: `none` | `metadata` | `secret`.
+         */discloses: String?, 
+        /**
+         * Whether the task acts with the subject's own authority.
+         */actsAsSubject: Bool, 
+        /**
+         * What executing will do — the basis of the operator's decision. MAY be
+         * empty; fall back to `consequences`, and if both are empty the UI must say
+         * the consequences could not be determined (never render "no effects").
+         */effects: [TaskConsentEffect], 
+        /**
+         * The identifier the task acts on, when known.
+         */subject: String?, 
+        /**
+         * Browser-attested origin of the page that proposed the task, when present.
+         */origin: String?, 
+        /**
+         * RFC 3339 expiry of the pending request, when present.
+         */expiresAt: String?, 
+        /**
+         * The task specification's static fallback text, used when `effects` is
+         * empty because the VTA had no dry-run for this handler.
+         */consequences: [String]) {
         self.issuer = issuer
         self.challenge = challenge
         self.payloadDigest = payloadDigest
@@ -3026,105 +3200,40 @@ public struct TaskConsentRequest {
         self.expiresAt = expiresAt
         self.consequences = consequences
     }
+
+    
+
+    
 }
 
-extension TaskConsentRequest: Equatable, Hashable {
-    public static func == (lhs: TaskConsentRequest, rhs: TaskConsentRequest) -> Bool {
-        if lhs.issuer != rhs.issuer {
-            return false
-        }
-        if lhs.challenge != rhs.challenge {
-            return false
-        }
-        if lhs.payloadDigest != rhs.payloadDigest {
-            return false
-        }
-        if lhs.matchCode != rhs.matchCode {
-            return false
-        }
-        if lhs.taskType != rhs.taskType {
-            return false
-        }
-        if lhs.requester != rhs.requester {
-            return false
-        }
-        if lhs.approverSet != rhs.approverSet {
-            return false
-        }
-        if lhs.minApprovals != rhs.minApprovals {
-            return false
-        }
-        if lhs.sideEffects != rhs.sideEffects {
-            return false
-        }
-        if lhs.discloses != rhs.discloses {
-            return false
-        }
-        if lhs.actsAsSubject != rhs.actsAsSubject {
-            return false
-        }
-        if lhs.effects != rhs.effects {
-            return false
-        }
-        if lhs.subject != rhs.subject {
-            return false
-        }
-        if lhs.origin != rhs.origin {
-            return false
-        }
-        if lhs.expiresAt != rhs.expiresAt {
-            return false
-        }
-        if lhs.consequences != rhs.consequences {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(issuer)
-        hasher.combine(challenge)
-        hasher.combine(payloadDigest)
-        hasher.combine(matchCode)
-        hasher.combine(taskType)
-        hasher.combine(requester)
-        hasher.combine(approverSet)
-        hasher.combine(minApprovals)
-        hasher.combine(sideEffects)
-        hasher.combine(discloses)
-        hasher.combine(actsAsSubject)
-        hasher.combine(effects)
-        hasher.combine(subject)
-        hasher.combine(origin)
-        hasher.combine(expiresAt)
-        hasher.combine(consequences)
-    }
-}
+#if compiler(>=6)
+extension TaskConsentRequest: Sendable {}
+#endif
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeTaskConsentRequest: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TaskConsentRequest {
         return
             try TaskConsentRequest(
-                issuer: FfiConverterString.read(from: &buf),
-                challenge: FfiConverterString.read(from: &buf),
-                payloadDigest: FfiConverterString.read(from: &buf),
-                matchCode: FfiConverterString.read(from: &buf),
-                taskType: FfiConverterString.read(from: &buf),
-                requester: FfiConverterString.read(from: &buf),
-                approverSet: FfiConverterOptionString.read(from: &buf),
-                minApprovals: FfiConverterUInt64.read(from: &buf),
-                sideEffects: FfiConverterOptionString.read(from: &buf),
-                discloses: FfiConverterOptionString.read(from: &buf),
-                actsAsSubject: FfiConverterBool.read(from: &buf),
-                effects: FfiConverterSequenceTypeTaskConsentEffect.read(from: &buf),
-                subject: FfiConverterOptionString.read(from: &buf),
-                origin: FfiConverterOptionString.read(from: &buf),
-                expiresAt: FfiConverterOptionString.read(from: &buf),
+                issuer: FfiConverterString.read(from: &buf), 
+                challenge: FfiConverterString.read(from: &buf), 
+                payloadDigest: FfiConverterString.read(from: &buf), 
+                matchCode: FfiConverterString.read(from: &buf), 
+                taskType: FfiConverterString.read(from: &buf), 
+                requester: FfiConverterString.read(from: &buf), 
+                approverSet: FfiConverterOptionString.read(from: &buf), 
+                minApprovals: FfiConverterUInt64.read(from: &buf), 
+                sideEffects: FfiConverterOptionString.read(from: &buf), 
+                discloses: FfiConverterOptionString.read(from: &buf), 
+                actsAsSubject: FfiConverterBool.read(from: &buf), 
+                effects: FfiConverterSequenceTypeTaskConsentEffect.read(from: &buf), 
+                subject: FfiConverterOptionString.read(from: &buf), 
+                origin: FfiConverterOptionString.read(from: &buf), 
+                expiresAt: FfiConverterOptionString.read(from: &buf), 
                 consequences: FfiConverterSequenceString.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: TaskConsentRequest, into buf: inout [UInt8]) {
@@ -3147,24 +3256,26 @@ public struct FfiConverterTypeTaskConsentRequest: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeTaskConsentRequest_lift(_ buf: RustBuffer) throws -> TaskConsentRequest {
     return try FfiConverterTypeTaskConsentRequest.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeTaskConsentRequest_lower(_ value: TaskConsentRequest) -> RustBuffer {
     return FfiConverterTypeTaskConsentRequest.lower(value)
 }
 
+
 /**
  * The outcome of unpacking an inbound DIDComm message.
  */
-public struct UnpackedMessage {
+public struct UnpackedMessage: Equatable, Hashable {
     /**
      * The plaintext DIDComm message as JSON (`type`/`body`/`from`/`to`/`id`/…).
      */
@@ -3180,59 +3291,45 @@ public struct UnpackedMessage {
      */
     public var senderKid: String?
 
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
     public init(
-        /* 
+        /**
          * The plaintext DIDComm message as JSON (`type`/`body`/`from`/`to`/`id`/…).
-         */ messageJson: String,
-        /* 
-            * `true` when the message was authcrypt'd (sender-authenticated) or signed.
-            * `false` for anoncrypt and unauthenticated plaintext — do not trust
-            * `from` in that case.
-            */ senderAuthenticated: Bool,
-        /* 
-            * The authenticated sender key id, when present.
-            */ senderKid: String?
-    ) {
+         */messageJson: String, 
+        /**
+         * `true` when the message was authcrypt'd (sender-authenticated) or signed.
+         * `false` for anoncrypt and unauthenticated plaintext — do not trust
+         * `from` in that case.
+         */senderAuthenticated: Bool, 
+        /**
+         * The authenticated sender key id, when present.
+         */senderKid: String?) {
         self.messageJson = messageJson
         self.senderAuthenticated = senderAuthenticated
         self.senderKid = senderKid
     }
+
+    
+
+    
 }
 
-extension UnpackedMessage: Equatable, Hashable {
-    public static func == (lhs: UnpackedMessage, rhs: UnpackedMessage) -> Bool {
-        if lhs.messageJson != rhs.messageJson {
-            return false
-        }
-        if lhs.senderAuthenticated != rhs.senderAuthenticated {
-            return false
-        }
-        if lhs.senderKid != rhs.senderKid {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(messageJson)
-        hasher.combine(senderAuthenticated)
-        hasher.combine(senderKid)
-    }
-}
+#if compiler(>=6)
+extension UnpackedMessage: Sendable {}
+#endif
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeUnpackedMessage: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UnpackedMessage {
         return
             try UnpackedMessage(
-                messageJson: FfiConverterString.read(from: &buf),
-                senderAuthenticated: FfiConverterBool.read(from: &buf),
+                messageJson: FfiConverterString.read(from: &buf), 
+                senderAuthenticated: FfiConverterBool.read(from: &buf), 
                 senderKid: FfiConverterOptionString.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: UnpackedMessage, into buf: inout [UInt8]) {
@@ -3242,26 +3339,28 @@ public struct FfiConverterTypeUnpackedMessage: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeUnpackedMessage_lift(_ buf: RustBuffer) throws -> UnpackedMessage {
     return try FfiConverterTypeUnpackedMessage.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeUnpackedMessage_lower(_ value: UnpackedMessage) -> RustBuffer {
     return FfiConverterTypeUnpackedMessage.lower(value)
 }
+
 
 /**
  * The VTA's transport endpoints, discovered from its DID document — so a client
  * can be configured with just the **VTA DID** instead of a hand-typed URL +
  * mediator.
  */
-public struct VtaEndpoints {
+public struct VtaEndpoints: Equatable, Hashable {
     /**
      * REST base URL, from a REST service entry (`VTARest` for a VTA,
      * `TRQPRest` for a Trust Registry), matched by `type`. `None` if the
@@ -3274,51 +3373,41 @@ public struct VtaEndpoints {
      */
     public var mediatorDid: String?
 
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
     public init(
-        /* 
+        /**
          * REST base URL, from a REST service entry (`VTARest` for a VTA,
          * `TRQPRest` for a Trust Registry), matched by `type`. `None` if the
          * VTA advertises no REST service.
-         */ restBaseUrl: String?,
-        /* 
-            * Mediator DID, from the `#vta-didcomm` (`DIDCommMessaging`) service's
-            * endpoint `uri`. `None` if the VTA advertises no DIDComm service.
-            */ mediatorDid: String?
-    ) {
+         */restBaseUrl: String?, 
+        /**
+         * Mediator DID, from the `#vta-didcomm` (`DIDCommMessaging`) service's
+         * endpoint `uri`. `None` if the VTA advertises no DIDComm service.
+         */mediatorDid: String?) {
         self.restBaseUrl = restBaseUrl
         self.mediatorDid = mediatorDid
     }
+
+    
+
+    
 }
 
-extension VtaEndpoints: Equatable, Hashable {
-    public static func == (lhs: VtaEndpoints, rhs: VtaEndpoints) -> Bool {
-        if lhs.restBaseUrl != rhs.restBaseUrl {
-            return false
-        }
-        if lhs.mediatorDid != rhs.mediatorDid {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(restBaseUrl)
-        hasher.combine(mediatorDid)
-    }
-}
+#if compiler(>=6)
+extension VtaEndpoints: Sendable {}
+#endif
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeVtaEndpoints: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VtaEndpoints {
         return
             try VtaEndpoints(
-                restBaseUrl: FfiConverterOptionString.read(from: &buf),
+                restBaseUrl: FfiConverterOptionString.read(from: &buf), 
                 mediatorDid: FfiConverterOptionString.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: VtaEndpoints, into buf: inout [UInt8]) {
@@ -3327,64 +3416,57 @@ public struct FfiConverterTypeVtaEndpoints: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeVtaEndpoints_lift(_ buf: RustBuffer) throws -> VtaEndpoints {
     return try FfiConverterTypeVtaEndpoints.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeVtaEndpoints_lower(_ value: VtaEndpoints) -> RustBuffer {
     return FfiConverterTypeVtaEndpoints.lower(value)
 }
+
 
 /**
  * The opaque gateway-issued reference to a device's push channel. Reveals no
  * platform token. `gateway` is a DID (DIDComm gateway) or an https URL (REST
  * gateway); the device conveys this — never the token — to its VTA.
  */
-public struct WakeHandle {
+public struct WakeHandle: Equatable, Hashable {
     public var gateway: String
     public var handle: String
 
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
     public init(gateway: String, handle: String) {
         self.gateway = gateway
         self.handle = handle
     }
+
+    
+
+    
 }
 
-extension WakeHandle: Equatable, Hashable {
-    public static func == (lhs: WakeHandle, rhs: WakeHandle) -> Bool {
-        if lhs.gateway != rhs.gateway {
-            return false
-        }
-        if lhs.handle != rhs.handle {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(gateway)
-        hasher.combine(handle)
-    }
-}
+#if compiler(>=6)
+extension WakeHandle: Sendable {}
+#endif
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeWakeHandle: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WakeHandle {
         return
             try WakeHandle(
-                gateway: FfiConverterString.read(from: &buf),
+                gateway: FfiConverterString.read(from: &buf), 
                 handle: FfiConverterString.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: WakeHandle, into buf: inout [UInt8]) {
@@ -3393,26 +3475,28 @@ public struct FfiConverterTypeWakeHandle: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeWakeHandle_lift(_ buf: RustBuffer) throws -> WakeHandle {
     return try FfiConverterTypeWakeHandle.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeWakeHandle_lower(_ value: WakeHandle) -> RustBuffer {
     return FfiConverterTypeWakeHandle.lower(value)
 }
+
 
 /**
  * A WebAuthn assertion produced natively (`ASAuthorization` / Credential
  * Manager). Binary fields are base64url-encoded, mirroring
  * `AuthenticatorAssertionResponse`.
  */
-public struct WebAuthnAssertion {
+public struct WebAuthnAssertion: Equatable, Hashable {
     /**
      * The credential id (used for both `id` and `rawId`).
      */
@@ -3425,66 +3509,44 @@ public struct WebAuthnAssertion {
      */
     public var userHandle: String?
 
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
     public init(
-        /* 
+        /**
          * The credential id (used for both `id` and `rawId`).
-         */ credentialId: String, clientDataJson: String, authenticatorData: String, signature: String,
-        /* 
-            * Present for discoverable credentials; maps the assertion to a subject.
-            */ userHandle: String?
-    ) {
+         */credentialId: String, clientDataJson: String, authenticatorData: String, signature: String, 
+        /**
+         * Present for discoverable credentials; maps the assertion to a subject.
+         */userHandle: String?) {
         self.credentialId = credentialId
         self.clientDataJson = clientDataJson
         self.authenticatorData = authenticatorData
         self.signature = signature
         self.userHandle = userHandle
     }
+
+    
+
+    
 }
 
-extension WebAuthnAssertion: Equatable, Hashable {
-    public static func == (lhs: WebAuthnAssertion, rhs: WebAuthnAssertion) -> Bool {
-        if lhs.credentialId != rhs.credentialId {
-            return false
-        }
-        if lhs.clientDataJson != rhs.clientDataJson {
-            return false
-        }
-        if lhs.authenticatorData != rhs.authenticatorData {
-            return false
-        }
-        if lhs.signature != rhs.signature {
-            return false
-        }
-        if lhs.userHandle != rhs.userHandle {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(credentialId)
-        hasher.combine(clientDataJson)
-        hasher.combine(authenticatorData)
-        hasher.combine(signature)
-        hasher.combine(userHandle)
-    }
-}
+#if compiler(>=6)
+extension WebAuthnAssertion: Sendable {}
+#endif
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeWebAuthnAssertion: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WebAuthnAssertion {
         return
             try WebAuthnAssertion(
-                credentialId: FfiConverterString.read(from: &buf),
-                clientDataJson: FfiConverterString.read(from: &buf),
-                authenticatorData: FfiConverterString.read(from: &buf),
-                signature: FfiConverterString.read(from: &buf),
+                credentialId: FfiConverterString.read(from: &buf), 
+                clientDataJson: FfiConverterString.read(from: &buf), 
+                authenticatorData: FfiConverterString.read(from: &buf), 
+                signature: FfiConverterString.read(from: &buf), 
                 userHandle: FfiConverterOptionString.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: WebAuthnAssertion, into buf: inout [UInt8]) {
@@ -3496,34 +3558,120 @@ public struct FfiConverterTypeWebAuthnAssertion: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeWebAuthnAssertion_lift(_ buf: RustBuffer) throws -> WebAuthnAssertion {
     return try FfiConverterTypeWebAuthnAssertion.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeWebAuthnAssertion_lower(_ value: WebAuthnAssertion) -> RustBuffer {
     return FfiConverterTypeWebAuthnAssertion.lower(value)
 }
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-/* 
+
+/**
+ * How to reach a witness from a relationship DID: the highest-preference transport both DID
+ * documents advertise (TSP, then DIDComm), matched on service `type`.
+ */
+public struct WitnessRoute: Equatable, Hashable {
+    public var transport: WitnessTransport
+    /**
+     * The mediator the relationship DID's session connects through.
+     */
+    public var relationshipMediatorDid: String
+    /**
+     * The witness's mediator: the `mediator_did` for
+     * [`TspMediatorSession::send_trust_task`](crate::tsp::TspMediatorSession::send_trust_task).
+     */
+    public var witnessMediatorDid: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(transport: WitnessTransport, 
+        /**
+         * The mediator the relationship DID's session connects through.
+         */relationshipMediatorDid: String, 
+        /**
+         * The witness's mediator: the `mediator_did` for
+         * [`TspMediatorSession::send_trust_task`](crate::tsp::TspMediatorSession::send_trust_task).
+         */witnessMediatorDid: String) {
+        self.transport = transport
+        self.relationshipMediatorDid = relationshipMediatorDid
+        self.witnessMediatorDid = witnessMediatorDid
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension WitnessRoute: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWitnessRoute: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WitnessRoute {
+        return
+            try WitnessRoute(
+                transport: FfiConverterTypeWitnessTransport.read(from: &buf), 
+                relationshipMediatorDid: FfiConverterString.read(from: &buf), 
+                witnessMediatorDid: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WitnessRoute, into buf: inout [UInt8]) {
+        FfiConverterTypeWitnessTransport.write(value.transport, into: &buf)
+        FfiConverterString.write(value.relationshipMediatorDid, into: &buf)
+        FfiConverterString.write(value.witnessMediatorDid, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessRoute_lift(_ buf: RustBuffer) throws -> WitnessRoute {
+    return try FfiConverterTypeWitnessRoute.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessRoute_lower(_ value: WitnessRoute) -> RustBuffer {
+    return FfiConverterTypeWitnessRoute.lower(value)
+}
+
+
+/**
  * Which APNs environment issued the token — the gateway routes to the matching
  * Apple endpoint.
  */
 
-public enum ApnsEnvironment {
+public enum ApnsEnvironment: Equatable, Hashable {
+    
     case sandbox
     case production
+
+
+
+
+
 }
 
+#if compiler(>=6)
+extension ApnsEnvironment: Sendable {}
+#endif
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeApnsEnvironment: FfiConverterRustBuffer {
     typealias SwiftType = ApnsEnvironment
@@ -3531,63 +3679,77 @@ public struct FfiConverterTypeApnsEnvironment: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ApnsEnvironment {
         let variant: Int32 = try readInt(&buf)
         switch variant {
+        
         case 1: return .sandbox
-
+        
         case 2: return .production
-
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: ApnsEnvironment, into buf: inout [UInt8]) {
         switch value {
+        
+        
         case .sandbox:
             writeInt(&buf, Int32(1))
-
+        
+        
         case .production:
             writeInt(&buf, Int32(2))
+        
         }
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeApnsEnvironment_lift(_ buf: RustBuffer) throws -> ApnsEnvironment {
     return try FfiConverterTypeApnsEnvironment.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeApnsEnvironment_lower(_ value: ApnsEnvironment) -> RustBuffer {
     return FfiConverterTypeApnsEnvironment.lower(value)
 }
 
-extension ApnsEnvironment: Equatable, Hashable {}
+
 
 /**
  * Errors returned across the UniFFI boundary to Kotlin / Swift.
  */
-public enum FfiError {
+public 
+enum FfiError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+    
+    
     /**
      * Caller supplied a value that failed a precondition (shape, range, …).
      */
-    case InvalidInput(reason: String)
+    case InvalidInput(reason: String
+    )
     /**
      * A value that should have been a recognised encoding (base64url, JSON, …)
      * could not be decoded.
      */
-    case Decode(reason: String)
+    case Decode(reason: String
+    )
     /**
      * The requested operation is part of a not-yet-wired build-out slice.
      */
-    case Unimplemented(what: String)
+    case Unimplemented(what: String
+    )
     /**
      * A DIDComm mediator transport operation failed (connect, authenticate,
      * receive). Network/protocol failures from the live mediator surface here.
      */
-    case Transport(reason: String)
+    case Transport(reason: String
+    )
     /**
      * An inbound approval request could not be cryptographically attributed to
      * an enrolled executor: its Data Integrity proof is missing or invalid, the
@@ -3596,11 +3758,52 @@ public enum FfiError {
      * condition — the device MUST NOT prompt; drop the request (optionally
      * logging `reason`).
      */
-    case UntrustedIssuer(reason: String)
+    case UntrustedIssuer(reason: String
+    )
+    /**
+     * The request is authentic and from an enrolled issuer, but it is
+     * addressed to a different approver. The device MUST NOT prompt.
+     *
+     * **Separate from [`FfiError::UntrustedIssuer`] on purpose.** Nothing is
+     * wrong with the signature or the enrolment, so folding the two together
+     * would send whoever reads the log to check an allowlist that is correct.
+     * What failed is addressing: a document signed for one approver arriving
+     * at another is either misrouting or a valid prompt being replayed
+     * somewhere it can be answered by the wrong person, and the `recipient`
+     * member exists to make that refusable.
+     */
+    case NotForThisApprover(recipient: String
+    )
+    /**
+     * A reply to a Trust Task this device sent could not be attributed to the
+     * peer it was sent to: it carries no proof, the proof does not verify, it
+     * was made under a purpose other than `authentication` or with a key the
+     * peer does not list under `authentication`, its signer or `issuer` is not
+     * the peer, it is addressed to someone else, or its `threadId` is not the
+     * request's. Discard the reply unread. Error replies are held to the same
+     * rule: a refusal nobody can attribute is no more trustworthy than a
+     * success nobody can attribute.
+     */
+    case UnverifiedReply(reason: String
+    )
+
+    
+
+    
+
+    
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+    
 }
 
+#if compiler(>=6)
+extension FfiError: Sendable {}
+#endif
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeFfiError: FfiConverterRustBuffer {
     typealias SwiftType = FfiError
@@ -3608,73 +3811,308 @@ public struct FfiConverterTypeFfiError: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiError {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        case 1: return try .InvalidInput(
-                reason: FfiConverterString.read(from: &buf)
+
+        
+
+        
+        case 1: return .InvalidInput(
+            reason: try FfiConverterString.read(from: &buf)
             )
-        case 2: return try .Decode(
-                reason: FfiConverterString.read(from: &buf)
+        case 2: return .Decode(
+            reason: try FfiConverterString.read(from: &buf)
             )
-        case 3: return try .Unimplemented(
-                what: FfiConverterString.read(from: &buf)
+        case 3: return .Unimplemented(
+            what: try FfiConverterString.read(from: &buf)
             )
-        case 4: return try .Transport(
-                reason: FfiConverterString.read(from: &buf)
+        case 4: return .Transport(
+            reason: try FfiConverterString.read(from: &buf)
             )
-        case 5: return try .UntrustedIssuer(
-                reason: FfiConverterString.read(from: &buf)
+        case 5: return .UntrustedIssuer(
+            reason: try FfiConverterString.read(from: &buf)
             )
-        default: throw UniffiInternalError.unexpectedEnumCase
+        case 6: return .NotForThisApprover(
+            recipient: try FfiConverterString.read(from: &buf)
+            )
+        case 7: return .UnverifiedReply(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+
+         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: FfiError, into buf: inout [UInt8]) {
         switch value {
+
+        
+
+        
+        
         case let .InvalidInput(reason):
             writeInt(&buf, Int32(1))
             FfiConverterString.write(reason, into: &buf)
-
+            
+        
         case let .Decode(reason):
             writeInt(&buf, Int32(2))
             FfiConverterString.write(reason, into: &buf)
-
+            
+        
         case let .Unimplemented(what):
             writeInt(&buf, Int32(3))
             FfiConverterString.write(what, into: &buf)
-
+            
+        
         case let .Transport(reason):
             writeInt(&buf, Int32(4))
             FfiConverterString.write(reason, into: &buf)
-
+            
+        
         case let .UntrustedIssuer(reason):
             writeInt(&buf, Int32(5))
             FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .NotForThisApprover(recipient):
+            writeInt(&buf, Int32(6))
+            FfiConverterString.write(recipient, into: &buf)
+            
+        
+        case let .UnverifiedReply(reason):
+            writeInt(&buf, Int32(7))
+            FfiConverterString.write(reason, into: &buf)
+            
         }
     }
 }
 
-extension FfiError: Equatable, Hashable {}
 
-extension FfiError: Foundation.LocalizedError {
-    public var errorDescription: String? {
-        String(reflecting: self)
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiError_lift(_ buf: RustBuffer) throws -> FfiError {
+    return try FfiConverterTypeFfiError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiError_lower(_ value: FfiError) -> RustBuffer {
+    return FfiConverterTypeFfiError.lower(value)
+}
+
+
+/**
+ * The `vta/pcs/<task>` task a document is for.
+ */
+
+public enum PcsTask: Equatable, Hashable {
+    
+    case applicationsCreate
+    case applicationsShow
+    case applicationsDelete
+    case verifyAttestation
+    case prove
+    case rootRequest
+    case rootAccept
+    case tokensRequest
+    case tokensAccept
+    case tokensAbandon
+    case attest
+    case vetterShow
+    case voterRegister
+    case voterAccept
+    case vote
+    case voterReceipt
+    case voterRead
+    case voteEncrypted
+    case vetterRecover
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PcsTask: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePcsTask: FfiConverterRustBuffer {
+    typealias SwiftType = PcsTask
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PcsTask {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .applicationsCreate
+        
+        case 2: return .applicationsShow
+        
+        case 3: return .applicationsDelete
+        
+        case 4: return .verifyAttestation
+        
+        case 5: return .prove
+        
+        case 6: return .rootRequest
+        
+        case 7: return .rootAccept
+        
+        case 8: return .tokensRequest
+        
+        case 9: return .tokensAccept
+        
+        case 10: return .tokensAbandon
+        
+        case 11: return .attest
+        
+        case 12: return .vetterShow
+        
+        case 13: return .voterRegister
+        
+        case 14: return .voterAccept
+        
+        case 15: return .vote
+        
+        case 16: return .voterReceipt
+        
+        case 17: return .voterRead
+        
+        case 18: return .voteEncrypted
+        
+        case 19: return .vetterRecover
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PcsTask, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .applicationsCreate:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .applicationsShow:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .applicationsDelete:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .verifyAttestation:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .prove:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .rootRequest:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .rootAccept:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .tokensRequest:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .tokensAccept:
+            writeInt(&buf, Int32(9))
+        
+        
+        case .tokensAbandon:
+            writeInt(&buf, Int32(10))
+        
+        
+        case .attest:
+            writeInt(&buf, Int32(11))
+        
+        
+        case .vetterShow:
+            writeInt(&buf, Int32(12))
+        
+        
+        case .voterRegister:
+            writeInt(&buf, Int32(13))
+        
+        
+        case .voterAccept:
+            writeInt(&buf, Int32(14))
+        
+        
+        case .vote:
+            writeInt(&buf, Int32(15))
+        
+        
+        case .voterReceipt:
+            writeInt(&buf, Int32(16))
+        
+        
+        case .voterRead:
+            writeInt(&buf, Int32(17))
+        
+        
+        case .voteEncrypted:
+            writeInt(&buf, Int32(18))
+        
+        
+        case .vetterRecover:
+            writeInt(&buf, Int32(19))
+        
+        }
     }
 }
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-/* 
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePcsTask_lift(_ buf: RustBuffer) throws -> PcsTask {
+    return try FfiConverterTypePcsTask.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePcsTask_lower(_ value: PcsTask) -> RustBuffer {
+    return FfiConverterTypePcsTask.lower(value)
+}
+
+
+
+/**
  * The platform discriminator, for the advisory `pushPlatform` hint on
  * `device/set-wake` (the VTA never sees the token).
  */
 
-public enum PushPlatform {
+public enum PushPlatform: Equatable, Hashable {
+    
     case apns
     case fcm
     case webPush
+
+
+
+
+
 }
 
+#if compiler(>=6)
+extension PushPlatform: Sendable {}
+#endif
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypePushPlatform: FfiConverterRustBuffer {
     typealias SwiftType = PushPlatform
@@ -3682,73 +4120,91 @@ public struct FfiConverterTypePushPlatform: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PushPlatform {
         let variant: Int32 = try readInt(&buf)
         switch variant {
+        
         case 1: return .apns
-
+        
         case 2: return .fcm
-
+        
         case 3: return .webPush
-
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: PushPlatform, into buf: inout [UInt8]) {
         switch value {
+        
+        
         case .apns:
             writeInt(&buf, Int32(1))
-
+        
+        
         case .fcm:
             writeInt(&buf, Int32(2))
-
+        
+        
         case .webPush:
             writeInt(&buf, Int32(3))
+        
         }
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypePushPlatform_lift(_ buf: RustBuffer) throws -> PushPlatform {
     return try FfiConverterTypePushPlatform.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypePushPlatform_lower(_ value: PushPlatform) -> RustBuffer {
     return FfiConverterTypePushPlatform.lower(value)
 }
 
-extension PushPlatform: Equatable, Hashable {}
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-/* 
+
+/**
  * A device's platform push channel — the token the device registers with its
  * push **gateway** (`push/register`). The gateway holds it in exchange for an
  * opaque [`WakeHandle`]; the raw token never leaves the gateway. Mirrors the
  * `PushRegistration` shape in the device-binding shared schema.
  */
 
-public enum PushRegistration {
+public enum PushRegistration: Equatable, Hashable {
+    
     /**
      * Apple Push Notification service.
      */
-    case apns(token: String, topic: String, environment: ApnsEnvironment)
+    case apns(token: String, topic: String, environment: ApnsEnvironment
+    )
     /**
      * Firebase Cloud Messaging.
      */
-    case fcm(token: String)
+    case fcm(token: String
+    )
     /**
      * Web Push (RFC 8030 endpoint + RFC 8291 encryption keys). Self-hostable
      * via the gateway's VAPID keypair — no Apple/Google account required.
      */
-    case webPush(endpoint: String, p256dh: String, auth: String)
+    case webPush(endpoint: String, p256dh: String, auth: String
+    )
+
+
+
+
+
 }
 
+#if compiler(>=6)
+extension PushRegistration: Sendable {}
+#endif
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypePushRegistration: FfiConverterRustBuffer {
     typealias SwiftType = PushRegistration
@@ -3756,87 +4212,546 @@ public struct FfiConverterTypePushRegistration: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PushRegistration {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        case 1: return try .apns(token: FfiConverterString.read(from: &buf), topic: FfiConverterString.read(from: &buf), environment: FfiConverterTypeApnsEnvironment.read(from: &buf))
-
-        case 2: return try .fcm(token: FfiConverterString.read(from: &buf))
-
-        case 3: return try .webPush(endpoint: FfiConverterString.read(from: &buf), p256dh: FfiConverterString.read(from: &buf), auth: FfiConverterString.read(from: &buf))
-
+        
+        case 1: return .apns(token: try FfiConverterString.read(from: &buf), topic: try FfiConverterString.read(from: &buf), environment: try FfiConverterTypeApnsEnvironment.read(from: &buf)
+        )
+        
+        case 2: return .fcm(token: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 3: return .webPush(endpoint: try FfiConverterString.read(from: &buf), p256dh: try FfiConverterString.read(from: &buf), auth: try FfiConverterString.read(from: &buf)
+        )
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: PushRegistration, into buf: inout [UInt8]) {
         switch value {
-        case let .apns(token, topic, environment):
+        
+        
+        case let .apns(token,topic,environment):
             writeInt(&buf, Int32(1))
             FfiConverterString.write(token, into: &buf)
             FfiConverterString.write(topic, into: &buf)
             FfiConverterTypeApnsEnvironment.write(environment, into: &buf)
-
+            
+        
         case let .fcm(token):
             writeInt(&buf, Int32(2))
             FfiConverterString.write(token, into: &buf)
-
-        case let .webPush(endpoint, p256dh, auth):
+            
+        
+        case let .webPush(endpoint,p256dh,auth):
             writeInt(&buf, Int32(3))
             FfiConverterString.write(endpoint, into: &buf)
             FfiConverterString.write(p256dh, into: &buf)
             FfiConverterString.write(auth, into: &buf)
+            
         }
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypePushRegistration_lift(_ buf: RustBuffer) throws -> PushRegistration {
     return try FfiConverterTypePushRegistration.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypePushRegistration_lower(_ value: PushRegistration) -> RustBuffer {
     return FfiConverterTypePushRegistration.lower(value)
 }
 
-extension PushRegistration: Equatable, Hashable {}
+
+
+/**
+ * The document of the session the wallet is about to carry to the witness.
+ */
+
+public enum WitnessDocument: Equatable, Hashable {
+    
+    /**
+     * `witness/session/0.2`, from [`WitnessTask::Open`].
+     */
+    case session
+    /**
+     * `witness/session/submit/0.2`, from [`WitnessTask::Present`].
+     */
+    case submit
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WitnessDocument: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWitnessDocument: FfiConverterRustBuffer {
+    typealias SwiftType = WitnessDocument
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WitnessDocument {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .session
+        
+        case 2: return .submit
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WitnessDocument, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .session:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .submit:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessDocument_lift(_ buf: RustBuffer) throws -> WitnessDocument {
+    return try FfiConverterTypeWitnessDocument.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessDocument_lower(_ value: WitnessDocument) -> RustBuffer {
+    return FfiConverterTypeWitnessDocument.lower(value)
+}
+
+
+
+/**
+ * Which declared refusal a witness answered with, so the wallet can say the right thing.
+ */
+
+public enum WitnessRefusal: Equatable, Hashable {
+    
+    /**
+     * `witness/session:refused` — the witness will not witness this exchange (policy,
+     * capacity, or the parties). Not retryable; another witness may.
+     */
+    case sessionRefused
+    /**
+     * `witness/session/submit:challengeMismatch` — the submission is not bound to a live
+     * session of this witness (expired, already spent, or another session's). Open a new
+     * session.
+     */
+    case challengeMismatch
+    /**
+     * `witness/session/submit:presentationInvalid` — the witness did not accept the
+     * presented credentials (a proof, a validity window, or a community it does not serve).
+     */
+    case presentationInvalid
+    /**
+     * Any other code — a standard one (`malformedRequest`, `permissionDenied`, …) or one this
+     * engine does not know. `code` carries it.
+     */
+    case other
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WitnessRefusal: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWitnessRefusal: FfiConverterRustBuffer {
+    typealias SwiftType = WitnessRefusal
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WitnessRefusal {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .sessionRefused
+        
+        case 2: return .challengeMismatch
+        
+        case 3: return .presentationInvalid
+        
+        case 4: return .other
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WitnessRefusal, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .sessionRefused:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .challengeMismatch:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .presentationInvalid:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .other:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessRefusal_lift(_ buf: RustBuffer) throws -> WitnessRefusal {
+    return try FfiConverterTypeWitnessRefusal.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessRefusal_lower(_ value: WitnessRefusal) -> RustBuffer {
+    return FfiConverterTypeWitnessRefusal.lower(value)
+}
+
+
+
+/**
+ * What a witness answered, once the answer is proven to be the witness's.
+ */
+
+public enum WitnessReply: Equatable, Hashable {
+    
+    /**
+     * The witness's `#response`: hand `response_json` back to the VTA, unaltered, as the
+     * `response` of [`WitnessTask::Present`] (after the session) or [`WitnessTask::Accept`]
+     * (after the submission).
+     */
+    case answered(responseJson: String
+    )
+    /**
+     * A `trust-task-error`: the session ends here. Do not hand it to the VTA.
+     */
+    case refused(refusal: WitnessRefusal, 
+        /**
+         * The code as received, e.g. `witness/session:refused`.
+         */code: String, 
+        /**
+         * The witness's message, for logs; never parse it.
+         */message: String?, 
+        /**
+         * Whether the witness says the same document may be sent again.
+         */retryable: Bool
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WitnessReply: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWitnessReply: FfiConverterRustBuffer {
+    typealias SwiftType = WitnessReply
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WitnessReply {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .answered(responseJson: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 2: return .refused(refusal: try FfiConverterTypeWitnessRefusal.read(from: &buf), code: try FfiConverterString.read(from: &buf), message: try FfiConverterOptionString.read(from: &buf), retryable: try FfiConverterBool.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WitnessReply, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .answered(responseJson):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(responseJson, into: &buf)
+            
+        
+        case let .refused(refusal,code,message,retryable):
+            writeInt(&buf, Int32(2))
+            FfiConverterTypeWitnessRefusal.write(refusal, into: &buf)
+            FfiConverterString.write(code, into: &buf)
+            FfiConverterOptionString.write(message, into: &buf)
+            FfiConverterBool.write(retryable, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessReply_lift(_ buf: RustBuffer) throws -> WitnessReply {
+    return try FfiConverterTypeWitnessReply.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessReply_lower(_ value: WitnessReply) -> RustBuffer {
+    return FfiConverterTypeWitnessReply.lower(value)
+}
+
+
+
+/**
+ * The `vta/witness/<task>` task a document is for.
+ */
+
+public enum WitnessTask: Equatable, Hashable {
+    
+    /**
+     * `vta/witness/open/0.2` — the `witness/session` document to carry.
+     */
+    case `open`
+    /**
+     * `vta/witness/present/0.2` — hand back the session answer; the submit document to carry.
+     */
+    case present
+    /**
+     * `vta/witness/accept/0.2` — hand back the submit answer; the stored VWC.
+     */
+    case accept
+    /**
+     * `vta/witness/list/0.2` — read back the stored VWCs, each with its outcome evidence as
+     * stored: how a wallet that lost `accept`'s answer, or a second device, rebuilds its record.
+     */
+    case list
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WitnessTask: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWitnessTask: FfiConverterRustBuffer {
+    typealias SwiftType = WitnessTask
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WitnessTask {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .`open`
+        
+        case 2: return .present
+        
+        case 3: return .accept
+        
+        case 4: return .list
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WitnessTask, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .`open`:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .present:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .accept:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .list:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessTask_lift(_ buf: RustBuffer) throws -> WitnessTask {
+    return try FfiConverterTypeWitnessTask.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessTask_lower(_ value: WitnessTask) -> RustBuffer {
+    return FfiConverterTypeWitnessTask.lower(value)
+}
+
+
+
+/**
+ * The transport to carry a session's documents on, and where each side is reached.
+ */
+
+public enum WitnessTransport: Equatable, Hashable {
+    
+    case tsp
+    case didcomm
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WitnessTransport: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWitnessTransport: FfiConverterRustBuffer {
+    typealias SwiftType = WitnessTransport
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WitnessTransport {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .tsp
+        
+        case 2: return .didcomm
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WitnessTransport, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .tsp:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .didcomm:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessTransport_lift(_ buf: RustBuffer) throws -> WitnessTransport {
+    return try FfiConverterTypeWitnessTransport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWitnessTransport_lower(_ value: WitnessTransport) -> RustBuffer {
+    return FfiConverterTypeWitnessTransport.lower(value)
+}
+
+
+
+
 
 /**
  * A signing capability backed by a platform-protected private key, implemented
  * on the **native** (Kotlin/Swift) side. Per the workspace "default to DIDs"
  * principle, the key is identified by its `did:key`, never a raw pubkey.
  */
-public protocol Signer: AnyObject {
+public protocol Signer: AnyObject, Sendable {
+    
     /**
      * The `did:key` (Ed25519) whose key this signer controls. The engine uses
      * it as the proof `verificationMethod` on documents it assembles.
      */
-    func did() -> String
-
+    func did()  -> String
+    
     /**
      * Sign `payload` with the enclave-held key. The biometric prompt and the
      * Secure Enclave / StrongBox operation are performed natively; a user
      * cancellation or biometric failure returns [`FfiError`]. The signature is
      * raw bytes (EdDSA over `payload`); the engine never sees key material.
      */
-    func sign(payload: Data) throws -> Data
+    func sign(payload: Data) throws  -> Data
+    
 }
 
-/// Magic number for the Rust proxy to call using the same mechanism as every other method,
-/// to free the callback once it's dropped by Rust.
-private let IDX_CALLBACK_FREE: Int32 = 0
-// Callback return codes
-private let UNIFFI_CALLBACK_SUCCESS: Int32 = 0
-private let UNIFFI_CALLBACK_ERROR: Int32 = 1
-private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 
-/// Put the implementation in a struct so we don't pollute the top-level namespace
-private enum UniffiCallbackInterfaceSigner {
-    /// Create the VTable using a series of closures.
-    /// Swift automatically converts these into C callback functions.
-    static var vtable: UniffiVTableCallbackInterfaceSigner = .init(
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceSigner {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceSigner = UniffiVTableCallbackInterfaceSigner(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterCallbackInterfaceSigner.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface Signer: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterCallbackInterfaceSigner.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface Signer: handle missing in uniffiClone")
+            }
+        },
         did: { (
             uniffiHandle: UInt64,
             uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
@@ -3851,6 +4766,7 @@ private enum UniffiCallbackInterfaceSigner {
                 )
             }
 
+            
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterString.lower($0) }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -3870,83 +4786,105 @@ private enum UniffiCallbackInterfaceSigner {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
                 return try uniffiObj.sign(
-                    payload: FfiConverterData.lift(payload)
+                     payload: try FfiConverterData.lift(payload)
                 )
             }
 
+            
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
                 writeReturn: writeReturn,
-                lowerError: FfiConverterTypeFfiError.lower
+                lowerError: FfiConverterTypeFfiError_lower
             )
-        },
-        uniffiFree: { (uniffiHandle: UInt64) in
-            let result = try? FfiConverterCallbackInterfaceSigner.handleMap.remove(handle: uniffiHandle)
-            if result == nil {
-                print("Uniffi callback interface Signer: handle missing in uniffiFree")
-            }
         }
     )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceSigner> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceSigner>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
 }
 
 private func uniffiCallbackInitSigner() {
-    uniffi_vta_mobile_core_fn_init_callback_vtable_signer(&UniffiCallbackInterfaceSigner.vtable)
+    uniffi_vta_mobile_core_fn_init_callback_vtable_signer(UniffiCallbackInterfaceSigner.vtablePtr)
 }
 
 // FfiConverter protocol for callback interfaces
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private enum FfiConverterCallbackInterfaceSigner {
-    fileprivate static var handleMap = UniffiHandleMap<Signer>()
+fileprivate struct FfiConverterCallbackInterfaceSigner {
+    fileprivate static let handleMap = UniffiHandleMap<Signer>()
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceSigner : FfiConverter {
+    typealias SwiftType = Signer
+    typealias FfiType = UInt64
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-extension FfiConverterCallbackInterfaceSigner: FfiConverter {
-    typealias SwiftType = Signer
-    typealias FfiType = UInt64
-
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
     public static func lift(_ handle: UInt64) throws -> SwiftType {
         try handleMap.get(handle: handle)
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
         let handle: UInt64 = try readInt(&buf)
         return try lift(handle)
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func lower(_ v: SwiftType) -> UInt64 {
         return handleMap.insert(obj: v)
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
         writeInt(&buf, lower(v))
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+public func FfiConverterCallbackInterfaceSigner_lift(_ handle: UInt64) throws -> Signer {
+    return try FfiConverterCallbackInterfaceSigner.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceSigner_lower(_ v: Signer) -> UInt64 {
+    return FfiConverterCallbackInterfaceSigner.lower(v)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
     typealias SwiftType = UInt64?
 
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
         guard let value = value else {
             writeInt(&buf, Int8(0))
             return
@@ -3955,7 +4893,7 @@ private struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value, into: &buf)
     }
 
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterUInt64.read(from: &buf)
@@ -3965,12 +4903,12 @@ private struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterOptionString: FfiConverterRustBuffer {
+fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
         guard let value = value else {
             writeInt(&buf, Int8(0))
             return
@@ -3979,7 +4917,7 @@ private struct FfiConverterOptionString: FfiConverterRustBuffer {
         FfiConverterString.write(value, into: &buf)
     }
 
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterString.read(from: &buf)
@@ -3989,12 +4927,12 @@ private struct FfiConverterOptionString: FfiConverterRustBuffer {
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterOptionTypeAgentName: FfiConverterRustBuffer {
+fileprivate struct FfiConverterOptionTypeAgentName: FfiConverterRustBuffer {
     typealias SwiftType = AgentName?
 
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
         guard let value = value else {
             writeInt(&buf, Int8(0))
             return
@@ -4003,7 +4941,7 @@ private struct FfiConverterOptionTypeAgentName: FfiConverterRustBuffer {
         FfiConverterTypeAgentName.write(value, into: &buf)
     }
 
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeAgentName.read(from: &buf)
@@ -4013,12 +4951,12 @@ private struct FfiConverterOptionTypeAgentName: FfiConverterRustBuffer {
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterOptionTypeWakeHandle: FfiConverterRustBuffer {
+fileprivate struct FfiConverterOptionTypeWakeHandle: FfiConverterRustBuffer {
     typealias SwiftType = WakeHandle?
 
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
         guard let value = value else {
             writeInt(&buf, Int8(0))
             return
@@ -4027,7 +4965,7 @@ private struct FfiConverterOptionTypeWakeHandle: FfiConverterRustBuffer {
         FfiConverterTypeWakeHandle.write(value, into: &buf)
     }
 
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeWakeHandle.read(from: &buf)
@@ -4037,12 +4975,12 @@ private struct FfiConverterOptionTypeWakeHandle: FfiConverterRustBuffer {
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterOptionTypePushPlatform: FfiConverterRustBuffer {
+fileprivate struct FfiConverterOptionTypePushPlatform: FfiConverterRustBuffer {
     typealias SwiftType = PushPlatform?
 
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
         guard let value = value else {
             writeInt(&buf, Int8(0))
             return
@@ -4051,7 +4989,7 @@ private struct FfiConverterOptionTypePushPlatform: FfiConverterRustBuffer {
         FfiConverterTypePushPlatform.write(value, into: &buf)
     }
 
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypePushPlatform.read(from: &buf)
@@ -4061,12 +4999,12 @@ private struct FfiConverterOptionTypePushPlatform: FfiConverterRustBuffer {
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterOptionSequenceString: FfiConverterRustBuffer {
+fileprivate struct FfiConverterOptionSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]?
 
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
         guard let value = value else {
             writeInt(&buf, Int8(0))
             return
@@ -4075,7 +5013,7 @@ private struct FfiConverterOptionSequenceString: FfiConverterRustBuffer {
         FfiConverterSequenceString.write(value, into: &buf)
     }
 
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterSequenceString.read(from: &buf)
@@ -4085,12 +5023,12 @@ private struct FfiConverterOptionSequenceString: FfiConverterRustBuffer {
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterSequenceString: FfiConverterRustBuffer {
+fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
-    static func write(_ value: [String], into buf: inout [UInt8]) {
+    public static func write(_ value: [String], into buf: inout [UInt8]) {
         let len = Int32(value.count)
         writeInt(&buf, len)
         for item in value {
@@ -4098,24 +5036,49 @@ private struct FfiConverterSequenceString: FfiConverterRustBuffer {
         }
     }
 
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String] {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String] {
         let len: Int32 = try readInt(&buf)
         var seq = [String]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            try seq.append(FfiConverterString.read(from: &buf))
+            seq.append(try FfiConverterString.read(from: &buf))
         }
         return seq
     }
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterSequenceTypeTaskConsentEffect: FfiConverterRustBuffer {
+fileprivate struct FfiConverterSequenceTypeHolderSecret: FfiConverterRustBuffer {
+    typealias SwiftType = [HolderSecret]
+
+    public static func write(_ value: [HolderSecret], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeHolderSecret.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [HolderSecret] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [HolderSecret]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeHolderSecret.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTaskConsentEffect: FfiConverterRustBuffer {
     typealias SwiftType = [TaskConsentEffect]
 
-    static func write(_ value: [TaskConsentEffect], into buf: inout [UInt8]) {
+    public static func write(_ value: [TaskConsentEffect], into buf: inout [UInt8]) {
         let len = Int32(value.count)
         writeInt(&buf, len)
         for item in value {
@@ -4123,43 +5086,44 @@ private struct FfiConverterSequenceTypeTaskConsentEffect: FfiConverterRustBuffer
         }
     }
 
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TaskConsentEffect] {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TaskConsentEffect] {
         let len: Int32 = try readInt(&buf)
         var seq = [TaskConsentEffect]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeTaskConsentEffect.read(from: &buf))
+            seq.append(try FfiConverterTypeTaskConsentEffect.read(from: &buf))
         }
         return seq
     }
 }
-
 private let UNIFFI_RUST_FUTURE_POLL_READY: Int8 = 0
-private let UNIFFI_RUST_FUTURE_POLL_MAYBE_READY: Int8 = 1
+private let UNIFFI_RUST_FUTURE_POLL_WAKE: Int8 = 1
 
-private let uniffiContinuationHandleMap = UniffiHandleMap<UnsafeContinuation<Int8, Never>>()
+fileprivate let uniffiContinuationHandleMap = UniffiHandleMap<UnsafeContinuation<Int8, Never>>()
 
-private func uniffiRustCallAsync<F, T>(
+fileprivate func uniffiRustCallAsync<F, T>(
     rustFutureFunc: () -> UInt64,
-    pollFunc: (UInt64, @escaping UniffiRustFutureContinuationCallback, UInt64) -> Void,
+    pollFunc: (UInt64, @escaping UniffiRustFutureContinuationCallback, UInt64) -> (),
     completeFunc: (UInt64, UnsafeMutablePointer<RustCallStatus>) -> F,
-    freeFunc: (UInt64) -> Void,
+    freeFunc: (UInt64) -> (),
     liftFunc: (F) throws -> T,
     errorHandler: ((RustBuffer) throws -> Swift.Error)?
 ) async throws -> T {
-    // Make sure to call uniffiEnsureInitialized() since future creation doesn't have a
+    // Make sure to call the ensure init function since future creation doesn't have a
     // RustCallStatus param, so doesn't use makeRustCall()
-    uniffiEnsureInitialized()
+    uniffiEnsureVtaMobileCoreInitialized()
     let rustFuture = rustFutureFunc()
     defer {
         freeFunc(rustFuture)
     }
-    var pollResult: Int8
+    var pollResult: Int8;
     repeat {
         pollResult = await withUnsafeContinuation {
             pollFunc(
                 rustFuture,
-                uniffiFutureContinuationCallback,
+                { handle, pollResult in
+                    uniffiFutureContinuationCallback(handle: handle, pollResult: pollResult)
+                },
                 uniffiContinuationHandleMap.insert(obj: $0)
             )
         }
@@ -4171,243 +5135,129 @@ private func uniffiRustCallAsync<F, T>(
     ))
 }
 
-/// Callback handlers for an async calls.  These are invoked by Rust when the future is ready.  They
-/// lift the return value or error and resume the suspended function.
-private func uniffiFutureContinuationCallback(handle: UInt64, pollResult: Int8) {
+// Callback handlers for an async calls.  These are invoked by Rust when the future is ready.  They
+// lift the return value or error and resume the suspended function.
+fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: Int8) {
     if let continuation = try? uniffiContinuationHandleMap.remove(handle: handle) {
         continuation.resume(returning: pollResult)
     } else {
         print("uniffiFutureContinuationCallback invalid handle")
     }
 }
-
-/**
- * Build a DID-signed **denial** `auth/step-up/approve-response/0.2`: decision
- * `denied`, carrying the human `reason`, gated by the same `eddsa-jcs-2022`
- * proof as an approval. A denial is a *signed refusal* — the VTA verifies the
- * gate (so an injection can't forge it), audits `step_up_denied`, and elevates
- * nothing. This is how the operator says "no" from the device.
- */
-public func buildApproveResponseDenied(draft: ApproveResponseDraft, reason: String, signer: Signer) throws -> String {
-    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_build_approve_response_denied(
-            FfiConverterTypeApproveResponseDraft.lower(draft),
-            FfiConverterString.lower(reason),
-            FfiConverterCallbackInterfaceSigner.lower(signer), $0
-        )
-    })
-}
-
-/**
- * Build a DID-signed `auth/step-up/approve-response/0.2`: decision `approved`,
- * `evidence.kind = didSigned`, gated by a Data Integrity proof
- * (`eddsa-jcs-2022`) over the document. `signer` is the native enclave key
- * (the holder/subject key) — its private material never enters this crate;
- * it only signs the canonical input produced here.
- */
-public func buildApproveResponseDidSigned(draft: ApproveResponseDraft, signer: Signer) throws -> String {
-    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_build_approve_response_did_signed(
-            FfiConverterTypeApproveResponseDraft.lower(draft),
-            FfiConverterCallbackInterfaceSigner.lower(signer), $0
-        )
-    })
-}
-
-/**
- * Build a passkey-backed `auth/step-up/approve-response/0.2`: decision
- * `approved`, `evidence.kind = webauthn` carrying `assertion`. The assertion is
- * the gate, so no framework proof is attached. Returns the serialized Trust
- * Task JSON for the native layer to send back to the relying party.
- */
-public func buildApproveResponseWebauthn(draft: ApproveResponseDraft, assertion: WebAuthnAssertion) throws -> String {
-    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_build_approve_response_webauthn(
-            FfiConverterTypeApproveResponseDraft.lower(draft),
-            FfiConverterTypeWebAuthnAssertion.lower(assertion), $0
-        )
-    })
-}
-
-/**
- * Build an `auth/challenge/0.1` request to start VTA authentication. No proof —
- * the response carries the nonce the holder will sign in `authenticate`.
- */
-public func buildAuthChallenge(env: AuthEnvelope, subject: String?, purpose: String?) throws -> String {
-    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_build_auth_challenge(
-            FfiConverterTypeAuthEnvelope.lower(env),
-            FfiConverterOptionString.lower(subject),
-            FfiConverterOptionString.lower(purpose), $0
-        )
-    })
-}
-
-/**
- * Build a signed `auth/authenticate/0.1`. The framework Data Integrity proof —
- * signed by the holder via `signer` — IS the authentication; `challenge` and
- * `session_id` are echoed from the challenge response.
- */
-public func buildAuthenticate(env: AuthEnvelope, challenge: String, sessionId: String, scope: [String], signer: Signer) throws -> String {
-    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_build_authenticate(
-            FfiConverterTypeAuthEnvelope.lower(env),
-            FfiConverterString.lower(challenge),
-            FfiConverterString.lower(sessionId),
-            FfiConverterSequenceString.lower(scope),
-            FfiConverterCallbackInterfaceSigner.lower(signer), $0
-        )
-    })
-}
-
-/**
- * Build a signed `device/set-wake/0.2` the device sends to its **VTA** to convey
- * the opaque [`WakeHandle`] it obtained from the gateway. The VTA owns the
- * trigger allowlist and provisions the gateway on the device's behalf.
- * **Proof-REQUIRED** — holder-signed via the native [`Signer`], so the VTA binds
- * the wake channel to the subject. Pass `wake_handle: None` to **clear** the
- * channel (the VTA empties the gateway allowlist; the device becomes
- * non-wakeable). `push_platform` and `suggested_triggers` are advisory hints the
- * VTA MAY ignore (it never sees the token; it owns the final allowlist).
- */
-public func buildDeviceSetWake(env: PushEnvelope, wakeHandle: WakeHandle?, pushPlatform: PushPlatform?, suggestedTriggers: [String], signer: Signer) throws -> String {
-    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_build_device_set_wake(
-            FfiConverterTypePushEnvelope.lower(env),
-            FfiConverterOptionTypeWakeHandle.lower(wakeHandle),
-            FfiConverterOptionTypePushPlatform.lower(pushPlatform),
-            FfiConverterSequenceString.lower(suggestedTriggers),
-            FfiConverterCallbackInterfaceSigner.lower(signer), $0
-        )
-    })
-}
-
-/**
- * Build an unauthenticated `push/register/0.2` document the device sends to its
- * push **gateway** to register a platform token. **No proof** — the handle is
- * opaque and only becomes usable once the `controller_vta_did` provisions a
- * trigger for it. `controller_vta_did` is the DID of the VTA permitted to
- * provision this handle's allowlist (the device conveys the handle there next
- * via [`build_device_set_wake`]).
- */
-public func buildPushRegister(env: PushEnvelope, registration: PushRegistration, controllerVtaDid: String) throws -> String {
-    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_build_push_register(
-            FfiConverterTypePushEnvelope.lower(env),
-            FfiConverterTypePushRegistration.lower(registration),
-            FfiConverterString.lower(controllerVtaDid), $0
-        )
-    })
-}
-
-/**
- * Build an `auth/refresh/0.1` request: exchange a previously-issued refresh
- * token for a new access token. **No proof** — `auth/refresh` is
- * `IS_PROOF_REQUIRED == false`; the opaque refresh token is the credential and
- * is verified server-side. `scope` MAY narrow (never widen) the issued scope;
- * pass empty to keep the session's current scope.
- */
-public func buildRefresh(env: AuthEnvelope, refreshToken: String, scope: [String]) throws -> String {
-    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_build_refresh(
-            FfiConverterTypeAuthEnvelope.lower(env),
-            FfiConverterString.lower(refreshToken),
-            FfiConverterSequenceString.lower(scope), $0
-        )
-    })
-}
-
-/**
- * Build a signed `auth/revoke-session/0.1` that invalidates **every** session
- * the auth service holds for the holder (e.g. "log out everywhere"). `reason`
- * is an optional audit-log rationale. Holder-signed, as
- * [`build_revoke_session`].
- */
-public func buildRevokeAllSessions(env: AuthEnvelope, reason: String?, signer: Signer) throws -> String {
-    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_build_revoke_all_sessions(
-            FfiConverterTypeAuthEnvelope.lower(env),
-            FfiConverterOptionString.lower(reason),
-            FfiConverterCallbackInterfaceSigner.lower(signer), $0
-        )
-    })
-}
-
-/**
- * Build a signed `auth/revoke-session/0.1` that invalidates one named session.
- * `reason` is an optional audit-log rationale (e.g. `"logout"`, `"device-lost"`,
- * `"key-rotation"`). `auth/revoke-session` is `IS_PROOF_REQUIRED == true`, so
- * the holder-signed proof (via `signer`) authorizes the revocation.
- */
-public func buildRevokeSession(env: AuthEnvelope, sessionId: String, reason: String?, signer: Signer) throws -> String {
-    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_build_revoke_session(
-            FfiConverterTypeAuthEnvelope.lower(env),
-            FfiConverterString.lower(sessionId),
-            FfiConverterOptionString.lower(reason),
-            FfiConverterCallbackInterfaceSigner.lower(signer), $0
-        )
-    })
-}
-
-/**
- * Build a DID-signed **denial** `task-consent/decision/0.1`, carrying the human
- * `reason`, gated by the same proof. A denial is a signed refusal the executor
- * records; nothing executes.
- */
-public func buildTaskConsentDecisionDenied(draft: TaskConsentDecisionDraft, reason: String, signer: Signer) throws -> String {
-    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_build_task_consent_decision_denied(
-            FfiConverterTypeTaskConsentDecisionDraft.lower(draft),
-            FfiConverterString.lower(reason),
-            FfiConverterCallbackInterfaceSigner.lower(signer), $0
-        )
-    })
-}
-
-/**
- * Build a DID-signed **approval** `task-consent/decision/0.1`, gated by an
- * `eddsa-jcs-2022` Data Integrity proof over the document. `signer` is the
- * native enclave key; its private material never enters this crate.
- */
-public func buildTaskConsentDecisionDidSigned(draft: TaskConsentDecisionDraft, signer: Signer) throws -> String {
-    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_build_task_consent_decision_did_signed(
-            FfiConverterTypeTaskConsentDecisionDraft.lower(draft),
-            FfiConverterCallbackInterfaceSigner.lower(signer), $0
-        )
-    })
-}
-
-/**
- * Build a signed `auth/whoami/0.1` introspection request. The payload is empty;
- * like authenticate, `auth/whoami` is `IS_PROOF_REQUIRED == true`, so the
- * holder-signed framework proof (via `signer`, reusing [`crate::proof`]) is
- * what authenticates the request.
- */
-public func buildWhoami(env: AuthEnvelope, signer: Signer) throws -> String {
-    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_build_whoami(
-            FfiConverterTypeAuthEnvelope.lower(env),
-            FfiConverterCallbackInterfaceSigner.lower(signer), $0
-        )
-    })
-}
-
 /**
  * Decodes a base64url step-up challenge and returns its length in bytes,
  * enforcing the ≥128-bit (16-byte) minimum the `auth/step-up/approve-request`
  * spec requires. A first *real*, pure, synchronous check that exercises the
  * `Result`/[`FfiError`] surface across the FFI boundary.
  */
-public func challengeLenBytes(challengeB64url: String) throws -> UInt32 {
-    return try FfiConverterUInt32.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_challenge_len_bytes(
-            FfiConverterString.lower(challengeB64url), $0
-        )
-    })
+public func challengeLenBytes(challengeB64url: String)throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_challenge_len_bytes(
+        FfiConverterString.lower(challengeB64url),uniffiCallStatus
+    )
+})
 }
-
+/**
+ * Returns engine metadata as a structured record (exercises UniFFI record
+ * codegen across the boundary).
+ */
+public func engineInfo() -> EngineInfo  {
+    return try!  FfiConverterTypeEngineInfo_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_engine_info(uniffiCallStatus
+    )
+})
+}
+/**
+ * Install a log subscriber that writes the engine's — and its dependencies'
+ * (`affinidi-messaging-sdk`, `vta-sdk`, the DID resolver, `reqwest`/`rustls`) —
+ * `tracing` output to **stderr**, which the **Xcode console** surfaces on iOS
+ * (and is visible via the device log on Android). Call once at app launch;
+ * idempotent and safe to call again.
+ *
+ * `directives` is an `EnvFilter` string, e.g. `"info"` or, to debug a stuck
+ * mediator/DIDComm connection,
+ * `"info,vta_mobile_core=debug,vta_sdk=debug,affinidi_messaging_sdk=debug"`.
+ * Without this, the engine's libraries log to a no-op and on-device failures
+ * (TLS handshakes, mediator round-trips) are invisible — only the FFI error
+ * string survives.
+ */
+public func initLogging(directives: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_init_logging(
+        FfiConverterString.lower(directives),uniffiCallStatus
+    )
+}
+}
+/**
+ * Returns the engine version string. The simplest possible FFI round-trip —
+ * the host app's first call to confirm linkage.
+ */
+public func libraryVersion() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_library_version(uniffiCallStatus
+    )
+})
+}
+/**
+ * Build a DID-signed **denial** `task-consent/decision/0.2`, carrying the human
+ * `reason`, gated by the same proof. A denial is a signed refusal the executor
+ * records; nothing executes.
+ */
+public func buildTaskConsentDecisionDenied(draft: TaskConsentDecisionDraft, reason: String, signer: Signer)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_build_task_consent_decision_denied(
+        FfiConverterTypeTaskConsentDecisionDraft_lower(draft),
+        FfiConverterString.lower(reason),
+        FfiConverterCallbackInterfaceSigner_lower(signer),uniffiCallStatus
+    )
+})
+}
+/**
+ * Build a DID-signed **approval** `task-consent/decision/0.2`, gated by an
+ * `eddsa-jcs-2022` Data Integrity proof over the document. `signer` is the
+ * native enclave key; its private material never enters this crate.
+ */
+public func buildTaskConsentDecisionDidSigned(draft: TaskConsentDecisionDraft, signer: Signer)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_build_task_consent_decision_did_signed(
+        FfiConverterTypeTaskConsentDecisionDraft_lower(draft),
+        FfiConverterCallbackInterfaceSigner_lower(signer),uniffiCallStatus
+    )
+})
+}
+/**
+ * Verify and parse an inbound `task-consent/request/0.1` for display.
+ *
+ * `trusted_issuers` is the enrolled-executor allowlist the native layer holds:
+ * the enrolled VTA's DID plus any granted executor DIDs. The request's Data
+ * Integrity proof is verified first ([`crate::proof::verify_signed_request`]);
+ * an unverifiable request returns [`FfiError::UntrustedIssuer`] and MUST NOT
+ * be prompted on. Async because verification resolves the issuer's DID for its
+ * key material (through the crate's shared resolver cache).
+ *
+ * Field extraction stays lenient by design (see the module note): validates
+ * the document type and the binding fields the decision must echo, and
+ * surfaces the rest best-effort.
+ */
+public func parseTaskConsentRequest(json: String, trustedIssuers: [String])async throws  -> TaskConsentRequest  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_func_parse_task_consent_request(FfiConverterString.lower(json),FfiConverterSequenceString.lower(trustedIssuers)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeTaskConsentRequest_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
 /**
  * Derive the DIDComm [`HolderKeys`] for an Ed25519 `did:key` holder from its
  * signing seed, so the native layer can open a [`DidcommSession`] without
@@ -4424,200 +5274,15 @@ public func challengeLenBytes(challengeB64url: String) throws -> UInt32 {
  * per the workspace "Default to DIDs" guidance. `signing_private_ed25519` is
  * the 32-byte Ed25519 seed; it never leaves the device beyond this struct.
  */
-public func didcommHolderKeys(did: String, signingPrivateEd25519: Data) throws -> HolderKeys {
-    return try FfiConverterTypeHolderKeys.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_didcomm_holder_keys(
-            FfiConverterString.lower(did),
-            FfiConverterData.lower(signingPrivateEd25519), $0
-        )
-    })
+public func didcommHolderKeys(did: String, signingPrivateEd25519: Data)throws  -> HolderKeys  {
+    return try  FfiConverterTypeHolderKeys_lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_didcomm_holder_keys(
+        FfiConverterString.lower(did),
+        FfiConverterData.lower(signingPrivateEd25519),uniffiCallStatus
+    )
+})
 }
-
-/**
- * Returns engine metadata as a structured record (exercises UniFFI record
- * codegen across the boundary).
- */
-public func engineInfo() -> EngineInfo {
-    return try! FfiConverterTypeEngineInfo.lift(try! rustCall {
-        uniffi_vta_mobile_core_fn_func_engine_info($0)
-    })
-}
-
-/**
- * Install a log subscriber that writes the engine's — and its dependencies'
- * (`affinidi-messaging-sdk`, `vta-sdk`, the DID resolver, `reqwest`/`rustls`) —
- * `tracing` output to **stderr**, which the **Xcode console** surfaces on iOS
- * (and is visible via the device log on Android). Call once at app launch;
- * idempotent and safe to call again.
- *
- * `directives` is an `EnvFilter` string, e.g. `"info"` or, to debug a stuck
- * mediator/DIDComm connection,
- * `"info,vta_mobile_core=debug,vta_sdk=debug,affinidi_messaging_sdk=debug"`.
- * Without this, the engine's libraries log to a no-op and on-device failures
- * (TLS handshakes, mediator round-trips) are invisible — only the FFI error
- * string survives.
- */
-public func initLogging(directives: String) {
-    try! rustCall {
-        uniffi_vta_mobile_core_fn_func_init_logging(
-            FfiConverterString.lower(directives), $0
-        )
-    }
-}
-
-/**
- * Returns the engine version string. The simplest possible FFI round-trip —
- * the host app's first call to confirm linkage.
- */
-public func libraryVersion() -> String {
-    return try! FfiConverterString.lift(try! rustCall {
-        uniffi_vta_mobile_core_fn_func_library_version($0)
-    })
-}
-
-/**
- * Parse an `auth/challenge/0.1#response`.
- */
-public func parseAuthChallengeResponse(json: String) throws -> AuthChallenge {
-    return try FfiConverterTypeAuthChallenge.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_parse_auth_challenge_response(
-            FfiConverterString.lower(json), $0
-        )
-    })
-}
-
-/**
- * Parse an `auth/authenticate/0.1#response` — the issued tokens + session.
- */
-public func parseAuthenticateResponse(json: String) throws -> AuthTokens {
-    return try FfiConverterTypeAuthTokens.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_parse_authenticate_response(
-            FfiConverterString.lower(json), $0
-        )
-    })
-}
-
-/**
- * Parse a `device/set-wake/0.2#response` — whether the device is now
- * push-capable and the effective allowlist the VTA provisioned to the gateway.
- */
-public func parseDeviceSetWakeResponse(json: String) throws -> SetWakeOutcome {
-    return try FfiConverterTypeSetWakeOutcome.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_parse_device_set_wake_response(
-            FfiConverterString.lower(json), $0
-        )
-    })
-}
-
-/**
- * Parse a `push/register/0.2#response` — the opaque [`WakeHandle`] the gateway
- * issued for the registered token.
- */
-public func parsePushRegisterResponse(json: String) throws -> WakeHandle {
-    return try FfiConverterTypeWakeHandle.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_parse_push_register_response(
-            FfiConverterString.lower(json), $0
-        )
-    })
-}
-
-/**
- * Parse an `auth/refresh/0.1#response` — the rotated tokens. Unlike
- * authenticate, the session snapshot is **optional**: when the response omits
- * it, `acr` is `None` and `amr` is empty (the caller keeps its prior session
- * state). A consumer that doesn't rotate refresh tokens may also omit
- * `refreshToken`, in which case the caller keeps reusing the current one.
- */
-public func parseRefreshResponse(json: String) throws -> AuthTokens {
-    return try FfiConverterTypeAuthTokens.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_parse_refresh_response(
-            FfiConverterString.lower(json), $0
-        )
-    })
-}
-
-/**
- * Parse an `auth/revoke-session/0.1#response` — the number of sessions
- * invalidated. Zero is a valid outcome (e.g. the session was already revoked).
- */
-public func parseRevokeSessionResponse(json: String) throws -> UInt64 {
-    return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_parse_revoke_session_response(
-            FfiConverterString.lower(json), $0
-        )
-    })
-}
-
-/**
- * Verify and parse an inbound `auth/step-up/approve-request/0.1` or `/0.2`
- * Trust Task document.
- *
- * `trusted_issuers` is the enrolled-executor allowlist the native layer holds:
- * the enrolled VTA's DID plus any granted executor DIDs. The request's Data
- * Integrity proof is verified first ([`crate::proof::verify_signed_request`]);
- * an unverifiable request returns [`FfiError::UntrustedIssuer`] and MUST NOT
- * be prompted on. Async because verification resolves the issuer's DID for its
- * key material (through the crate's shared resolver cache).
- *
- * The document is then deserialised and structurally validated via
- * `trust-tasks-rs` (well-formed envelope + required payload fields) and the
- * fields the native consent UI needs are surfaced. Returns
- * [`FfiError::Decode`] if the input is not a well-formed approve-request.
- */
-public func parseStepUpRequest(json: String, trustedIssuers: [String]) async throws -> StepUpRequest {
-    return
-        try await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_vta_mobile_core_fn_func_parse_step_up_request(FfiConverterString.lower(json), FfiConverterSequenceString.lower(trustedIssuers))
-            },
-            pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
-            completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
-            freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypeStepUpRequest.lift,
-            errorHandler: FfiConverterTypeFfiError.lift
-        )
-}
-
-/**
- * Verify and parse an inbound `task-consent/request/0.1` for display.
- *
- * `trusted_issuers` is the enrolled-executor allowlist the native layer holds:
- * the enrolled VTA's DID plus any granted executor DIDs. The request's Data
- * Integrity proof is verified first ([`crate::proof::verify_signed_request`]);
- * an unverifiable request returns [`FfiError::UntrustedIssuer`] and MUST NOT
- * be prompted on. Async because verification resolves the issuer's DID for its
- * key material (through the crate's shared resolver cache).
- *
- * Field extraction stays lenient by design (see the module note): validates
- * the document type and the binding fields the decision must echo, and
- * surfaces the rest best-effort.
- */
-public func parseTaskConsentRequest(json: String, trustedIssuers: [String]) async throws -> TaskConsentRequest {
-    return
-        try await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_vta_mobile_core_fn_func_parse_task_consent_request(FfiConverterString.lower(json), FfiConverterSequenceString.lower(trustedIssuers))
-            },
-            pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
-            completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
-            freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypeTaskConsentRequest.lift,
-            errorHandler: FfiConverterTypeFfiError.lift
-        )
-}
-
-/**
- * Parse an `auth/whoami/0.1#response` — the auth service's view of the holder:
- * the current session plus the roles/scopes it holds.
- */
-public func parseWhoamiResponse(json: String) throws -> SessionInfo {
-    return try FfiConverterTypeSessionInfo.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_parse_whoami_response(
-            FfiConverterString.lower(json), $0
-        )
-    })
-}
-
 /**
  * The agent name a DID's document claims, if any, with the round trip already
  * performed.
@@ -4633,62 +5298,21 @@ public func parseWhoamiResponse(json: String) throws -> SessionInfo {
  * lazily — per DID actually on screen — and caches the result rather than
  * calling this on every render.
  */
-public func resolveAgentName(did: String) async -> AgentName? {
+public func resolveAgentName(did: String)async  -> AgentName?  {
     return
-        try! await uniffiRustCallAsync(
+        try!  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_vta_mobile_core_fn_func_resolve_agent_name(FfiConverterString.lower(did))
+                uniffi_vta_mobile_core_fn_func_resolve_agent_name(FfiConverterString.lower(did)
+                )
             },
             pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
             completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
             freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionTypeAgentName.lift,
             errorHandler: nil
+            
         )
 }
-
-/**
- * Resolve a DID to its DID Document, returned as JSON.
- *
- * Used to find a peer's verification keys (to verify a relying party's step-up
- * proof) and key-agreement key (for DIDComm). `did:key` / `did:peer` resolve
- * locally; `did:web` / `did:webvh` resolve over the network. The first async
- * function exported across the FFI boundary.
- */
-public func resolveDid(did: String) async throws -> String {
-    return
-        try await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_vta_mobile_core_fn_func_resolve_did(FfiConverterString.lower(did))
-            },
-            pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
-            completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
-            freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterString.lift,
-            errorHandler: FfiConverterTypeFfiError.lift
-        )
-}
-
-/**
- * Resolve a VTA's DID and extract its transport endpoints (`#vta-rest` URL +
- * `#vta-didcomm` mediator DID). The app uses this to auto-fill the connection
- * from the DID alone. Resolves `did:key`/`did:peer` offline and `did:webvh`/
- * `did:web` over the network (same resolver the VTA uses to read service docs).
- */
-public func resolveVtaEndpoints(did: String) async throws -> VtaEndpoints {
-    return
-        try await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_vta_mobile_core_fn_func_resolve_vta_endpoints(FfiConverterString.lower(did))
-            },
-            pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
-            completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
-            freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypeVtaEndpoints.lift,
-            errorHandler: FfiConverterTypeFfiError.lift
-        )
-}
-
 /**
  * Abbreviate a DID for a narrow phone caption, keeping the part that
  * identifies it.
@@ -4699,14 +5323,14 @@ public func resolveVtaEndpoints(did: String) async throws -> VtaEndpoints {
  * every switch. See [`display_name::shorten_did`] for the rule and the shared
  * vector table that is its authority.
  */
-public func shortenDid(did: String) -> String {
-    return try! FfiConverterString.lift(try! rustCall {
-        uniffi_vta_mobile_core_fn_func_shorten_did(
-            FfiConverterString.lower(did), $0
-        )
-    })
+public func shortenDid(did: String) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_shorten_did(
+        FfiConverterString.lower(did),uniffiCallStatus
+    )
+})
 }
-
 /**
  * Exercises the custody seam end to end: decode a base64url step-up challenge
  * and have the native [`Signer`] sign those bytes, returning the signature.
@@ -4718,13 +5342,566 @@ public func shortenDid(did: String) -> String {
  * but the signing seam — engine builds bytes, native enclave signs them — is
  * exactly this.
  */
-public func signChallenge(signer: Signer, challengeB64url: String) throws -> Data {
-    return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeFfiError.lift) {
-        uniffi_vta_mobile_core_fn_func_sign_challenge(
-            FfiConverterCallbackInterfaceSigner.lower(signer),
-            FfiConverterString.lower(challengeB64url), $0
+public func signChallenge(signer: Signer, challengeB64url: String)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_sign_challenge(
+        FfiConverterCallbackInterfaceSigner_lower(signer),
+        FfiConverterString.lower(challengeB64url),uniffiCallStatus
+    )
+})
+}
+/**
+ * Build a holder-signed `vta/pcs/<task>` request to the holder's VTA.
+ *
+ * `payload_json` is the task's payload; it is checked against the task's generated type
+ * before anything is signed, so an `InvalidInput` here names the schema violation.
+ */
+public func buildPcsTask(env: AuthEnvelope, task: PcsTask, payloadJson: String, signer: Signer)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_build_pcs_task(
+        FfiConverterTypeAuthEnvelope_lower(env),
+        FfiConverterTypePcsTask_lower(task),
+        FfiConverterString.lower(payloadJson),
+        FfiConverterCallbackInterfaceSigner_lower(signer),uniffiCallStatus
+    )
+})
+}
+/**
+ * Check a `vta/pcs/<task>#response` against the task's generated response type and return its
+ * payload as JSON. A `trust-task-error` answer is not a response and fails here with `Decode`;
+ * the native layer reads its `payload.code` (`vta/pcs/prove:noUsableAttestation`, …) itself.
+ */
+public func parsePcsResponse(task: PcsTask, json: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_parse_pcs_response(
+        FfiConverterTypePcsTask_lower(task),
+        FfiConverterString.lower(json),uniffiCallStatus
+    )
+})
+}
+/**
+ * Build a signed `device/set-wake/0.2` the device sends to its **VTA** to convey
+ * the opaque [`WakeHandle`] it obtained from the gateway. The VTA owns the
+ * trigger allowlist and provisions the gateway on the device's behalf.
+ * **Proof-REQUIRED** — holder-signed via the native [`Signer`], so the VTA binds
+ * the wake channel to the subject. Pass `wake_handle: None` to **clear** the
+ * channel (the VTA empties the gateway allowlist; the device becomes
+ * non-wakeable). `push_platform` and `suggested_triggers` are advisory hints the
+ * VTA MAY ignore (it never sees the token; it owns the final allowlist).
+ */
+public func buildDeviceSetWake(env: PushEnvelope, wakeHandle: WakeHandle?, pushPlatform: PushPlatform?, suggestedTriggers: [String], signer: Signer)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_build_device_set_wake(
+        FfiConverterTypePushEnvelope_lower(env),
+        FfiConverterOptionTypeWakeHandle.lower(wakeHandle),
+        FfiConverterOptionTypePushPlatform.lower(pushPlatform),
+        FfiConverterSequenceString.lower(suggestedTriggers),
+        FfiConverterCallbackInterfaceSigner_lower(signer),uniffiCallStatus
+    )
+})
+}
+/**
+ * Build an unauthenticated `push/register/0.2` document the device sends to its
+ * push **gateway** to register a platform token. **No proof** — the handle is
+ * opaque and only becomes usable once the `controller_vta_did` provisions a
+ * trigger for it. `controller_vta_did` is the DID of the VTA permitted to
+ * provision this handle's allowlist (the device conveys the handle there next
+ * via [`build_device_set_wake`]).
+ */
+public func buildPushRegister(env: PushEnvelope, registration: PushRegistration, controllerVtaDid: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_build_push_register(
+        FfiConverterTypePushEnvelope_lower(env),
+        FfiConverterTypePushRegistration_lower(registration),
+        FfiConverterString.lower(controllerVtaDid),uniffiCallStatus
+    )
+})
+}
+/**
+ * Parse a `device/set-wake/0.2#response` — whether the device is now
+ * push-capable and the effective allowlist the VTA provisioned to the gateway.
+ */
+public func parseDeviceSetWakeResponse(json: String)throws  -> SetWakeOutcome  {
+    return try  FfiConverterTypeSetWakeOutcome_lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_parse_device_set_wake_response(
+        FfiConverterString.lower(json),uniffiCallStatus
+    )
+})
+}
+/**
+ * Parse a `push/register/0.2#response` — the opaque [`WakeHandle`] the gateway
+ * issued for the registered token.
+ */
+public func parsePushRegisterResponse(json: String)throws  -> WakeHandle  {
+    return try  FfiConverterTypeWakeHandle_lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_parse_push_register_response(
+        FfiConverterString.lower(json),uniffiCallStatus
+    )
+})
+}
+/**
+ * Verify `reply_json`, the reply to `request_json`, as the word of
+ * `expected_signer` (the peer the request was sent to — the VTA DID).
+ *
+ * Returns `Ok(())` only when the reply answers this request (`type` and
+ * `threadId`), is issued by `expected_signer` to the request's issuer, and
+ * carries a verifying `eddsa-jcs-2022` proof made by `expected_signer` with a
+ * key it lists under `authentication`, under proof purpose `authentication`.
+ * Error replies must pass too. Anything else is
+ * [`FfiError::UnverifiedReply`]: discard the reply unread.
+ */
+public func verifyTrustTaskReply(requestJson: String, replyJson: String, expectedSigner: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_func_verify_trust_task_reply(FfiConverterString.lower(requestJson),FfiConverterString.lower(replyJson),FfiConverterString.lower(expectedSigner)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_void,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_void,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
         )
-    })
+}
+/**
+ * Resolve a DID to its DID Document, returned as JSON.
+ *
+ * Used to find a peer's verification keys (to verify a relying party's step-up
+ * proof) and key-agreement key (for DIDComm). `did:key` / `did:peer` resolve
+ * locally; `did:web` / `did:webvh` resolve over the network. The first async
+ * function exported across the FFI boundary.
+ */
+public func resolveDid(did: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_func_resolve_did(FfiConverterString.lower(did)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+/**
+ * Resolve a VTA's DID and extract its transport endpoints (`#vta-rest` URL +
+ * `#vta-didcomm` mediator DID). The app uses this to auto-fill the connection
+ * from the DID alone. Resolves `did:key`/`did:peer` offline and `did:webvh`/
+ * `did:web` over the network (same resolver the VTA uses to read service docs).
+ */
+public func resolveVtaEndpoints(did: String)async throws  -> VtaEndpoints  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_func_resolve_vta_endpoints(FfiConverterString.lower(did)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeVtaEndpoints_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+/**
+ * Build an `auth/challenge/0.1` request to start VTA authentication. No proof —
+ * the response carries the nonce the holder will sign in `authenticate`.
+ */
+public func buildAuthChallenge(env: AuthEnvelope, subject: String?, purpose: String?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_build_auth_challenge(
+        FfiConverterTypeAuthEnvelope_lower(env),
+        FfiConverterOptionString.lower(subject),
+        FfiConverterOptionString.lower(purpose),uniffiCallStatus
+    )
+})
+}
+/**
+ * Build a signed `auth/authenticate/0.3`. The framework Data Integrity proof —
+ * signed by the holder via `signer` — IS the authentication; `challenge` and
+ * `session_id` are echoed from the challenge response.
+ */
+public func buildAuthenticate(env: AuthEnvelope, challenge: String, sessionId: String, scope: [String], signer: Signer)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_build_authenticate(
+        FfiConverterTypeAuthEnvelope_lower(env),
+        FfiConverterString.lower(challenge),
+        FfiConverterString.lower(sessionId),
+        FfiConverterSequenceString.lower(scope),
+        FfiConverterCallbackInterfaceSigner_lower(signer),uniffiCallStatus
+    )
+})
+}
+/**
+ * Build a signed `messaging/ping/0.2` liveness probe to the VTA.
+ *
+ * Over TSP this is how the device announces its reachability: the VTA records
+ * the sealed sender of any inbound frame as TSP-reachable (learn-from-inbound)
+ * and answers the ping. It is holder-signed like every other document the
+ * device sends — the VTA refuses an unsigned one (`proofRequired`). `env.id`
+ * doubles as the ping's correlation `nonce`.
+ */
+public func buildMessagingPing(env: AuthEnvelope, signer: Signer)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_build_messaging_ping(
+        FfiConverterTypeAuthEnvelope_lower(env),
+        FfiConverterCallbackInterfaceSigner_lower(signer),uniffiCallStatus
+    )
+})
+}
+/**
+ * Build an `auth/refresh/0.2` request: exchange a previously-issued refresh
+ * token for a new access token. **No proof** — `auth/refresh` is
+ * `IS_PROOF_REQUIRED == false`; the opaque refresh token is the credential and
+ * is verified server-side. `scope` MAY narrow (never widen) the issued scope;
+ * pass empty to keep the session's current scope.
+ */
+public func buildRefresh(env: AuthEnvelope, refreshToken: String, scope: [String])throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_build_refresh(
+        FfiConverterTypeAuthEnvelope_lower(env),
+        FfiConverterString.lower(refreshToken),
+        FfiConverterSequenceString.lower(scope),uniffiCallStatus
+    )
+})
+}
+/**
+ * Build a signed `auth/revoke-session/0.2` that invalidates **every** session
+ * the auth service holds for the holder (e.g. "log out everywhere"). `reason`
+ * is an optional audit-log rationale. Holder-signed, as
+ * [`build_revoke_session`].
+ */
+public func buildRevokeAllSessions(env: AuthEnvelope, reason: String?, signer: Signer)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_build_revoke_all_sessions(
+        FfiConverterTypeAuthEnvelope_lower(env),
+        FfiConverterOptionString.lower(reason),
+        FfiConverterCallbackInterfaceSigner_lower(signer),uniffiCallStatus
+    )
+})
+}
+/**
+ * Build a signed `auth/revoke-session/0.2` that invalidates one named session.
+ * `reason` is an optional audit-log rationale (e.g. `"logout"`, `"device-lost"`,
+ * `"key-rotation"`). `auth/revoke-session` is `IS_PROOF_REQUIRED == true`, so
+ * the holder-signed proof (via `signer`) authorizes the revocation.
+ */
+public func buildRevokeSession(env: AuthEnvelope, sessionId: String, reason: String?, signer: Signer)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_build_revoke_session(
+        FfiConverterTypeAuthEnvelope_lower(env),
+        FfiConverterString.lower(sessionId),
+        FfiConverterOptionString.lower(reason),
+        FfiConverterCallbackInterfaceSigner_lower(signer),uniffiCallStatus
+    )
+})
+}
+/**
+ * Build a signed `auth/whoami/0.1` introspection request. The payload is empty;
+ * like authenticate, `auth/whoami` is `IS_PROOF_REQUIRED == true`, so the
+ * holder-signed framework proof (via `signer`, reusing [`crate::proof`]) is
+ * what authenticates the request.
+ */
+public func buildWhoami(env: AuthEnvelope, signer: Signer)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_build_whoami(
+        FfiConverterTypeAuthEnvelope_lower(env),
+        FfiConverterCallbackInterfaceSigner_lower(signer),uniffiCallStatus
+    )
+})
+}
+/**
+ * Parse an `auth/challenge/0.1#response`.
+ */
+public func parseAuthChallengeResponse(json: String)throws  -> AuthChallenge  {
+    return try  FfiConverterTypeAuthChallenge_lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_parse_auth_challenge_response(
+        FfiConverterString.lower(json),uniffiCallStatus
+    )
+})
+}
+/**
+ * Parse an `auth/authenticate/0.3#response` — the issued tokens + session.
+ */
+public func parseAuthenticateResponse(json: String)throws  -> AuthTokens  {
+    return try  FfiConverterTypeAuthTokens_lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_parse_authenticate_response(
+        FfiConverterString.lower(json),uniffiCallStatus
+    )
+})
+}
+/**
+ * Parse an `auth/refresh/0.2#response` — the rotated tokens. Unlike
+ * authenticate, the session snapshot is **optional**: when the response omits
+ * it, `acr` is `None` and `amr` is empty (the caller keeps its prior session
+ * state). A consumer that doesn't rotate refresh tokens may also omit
+ * `refreshToken`, in which case the caller keeps reusing the current one.
+ */
+public func parseRefreshResponse(json: String)throws  -> AuthTokens  {
+    return try  FfiConverterTypeAuthTokens_lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_parse_refresh_response(
+        FfiConverterString.lower(json),uniffiCallStatus
+    )
+})
+}
+/**
+ * Parse an `auth/revoke-session/0.2#response` — the number of sessions
+ * invalidated. Zero is a valid outcome (e.g. the session was already revoked).
+ */
+public func parseRevokeSessionResponse(json: String)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_parse_revoke_session_response(
+        FfiConverterString.lower(json),uniffiCallStatus
+    )
+})
+}
+/**
+ * Parse an `auth/whoami/0.1#response` — the auth service's view of the holder:
+ * the current session plus the roles/scopes it holds.
+ */
+public func parseWhoamiResponse(json: String)throws  -> SessionInfo  {
+    return try  FfiConverterTypeSessionInfo_lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_parse_whoami_response(
+        FfiConverterString.lower(json),uniffiCallStatus
+    )
+})
+}
+/**
+ * Build a DID-signed **denial** `auth/step-up/approve-response/0.7`: decision
+ * `denied`, carrying the human `reason`, gated by the same `eddsa-jcs-2022`
+ * proof as an approval. A denial is a *signed refusal* — the VTA verifies the
+ * gate (so an injection can't forge it), audits `step_up_denied`, and elevates
+ * nothing. This is how the operator says "no" from the device.
+ */
+public func buildApproveResponseDenied(draft: ApproveResponseDraft, reason: String, signer: Signer)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_build_approve_response_denied(
+        FfiConverterTypeApproveResponseDraft_lower(draft),
+        FfiConverterString.lower(reason),
+        FfiConverterCallbackInterfaceSigner_lower(signer),uniffiCallStatus
+    )
+})
+}
+/**
+ * Build a DID-signed `auth/step-up/approve-response/0.7`: decision `approved`,
+ * `evidence.kind = didSigned`, gated by a Data Integrity proof
+ * (`eddsa-jcs-2022`) over the document. `signer` is the native enclave key
+ * (the holder/subject key) — its private material never enters this crate;
+ * it only signs the canonical input produced here.
+ */
+public func buildApproveResponseDidSigned(draft: ApproveResponseDraft, signer: Signer)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_build_approve_response_did_signed(
+        FfiConverterTypeApproveResponseDraft_lower(draft),
+        FfiConverterCallbackInterfaceSigner_lower(signer),uniffiCallStatus
+    )
+})
+}
+/**
+ * Build a passkey-backed `auth/step-up/approve-response/0.7`: decision
+ * `approved`, `evidence.kind = webauthn` carrying `assertion`. The assertion is
+ * the gate. The document additionally carries the approver's framework proof
+ * (via `signer`, whose DID must be `draft.issuer_did`), because the VTA refuses
+ * an unsigned Trust Task over DIDComm and TSP. Returns the serialized Trust
+ * Task JSON for the native layer to send back to the relying party.
+ */
+public func buildApproveResponseWebauthn(draft: ApproveResponseDraft, assertion: WebAuthnAssertion, signer: Signer)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_build_approve_response_webauthn(
+        FfiConverterTypeApproveResponseDraft_lower(draft),
+        FfiConverterTypeWebAuthnAssertion_lower(assertion),
+        FfiConverterCallbackInterfaceSigner_lower(signer),uniffiCallStatus
+    )
+})
+}
+/**
+ * Verify and parse an inbound `consent/approve-request/0.1` document.
+ *
+ * The sibling of [`parse_step_up_request`], and deliberately the same shape.
+ * `trusted_issuers` is the enrolled-executor allowlist the native layer holds;
+ * `approver` is this device's own approver identity.
+ *
+ * Three refusals, in order, and each is a different fault:
+ *
+ * 1. not a consent prompt → [`FfiError::Decode`];
+ * 2. no valid proof from an enrolled issuer → [`FfiError::UntrustedIssuer`],
+ * the spec's `untrusted_issuer` condition — **the device MUST NOT prompt**;
+ * 3. `recipient` is somebody else → [`FfiError::NotForThisApprover`]. An
+ * authentic prompt for another approver, arriving here, is misrouting or a
+ * replay aimed at whoever will tap first; the `recipient` member exists to
+ * be read, and until this function existed it was written and never read.
+ *
+ * Async because verification resolves the issuer's DID for its key material,
+ * through the crate's shared resolver cache.
+ */
+public func parseConsentRequest(json: String, trustedIssuers: [String], approver: String)async throws  -> ConsentRequest  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_func_parse_consent_request(FfiConverterString.lower(json),FfiConverterSequenceString.lower(trustedIssuers),FfiConverterString.lower(approver)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeConsentRequest_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+/**
+ * Verify and parse an inbound `auth/step-up/approve-request/0.5` Trust Task
+ * document.
+ *
+ * `trusted_issuers` is the enrolled-executor allowlist the native layer holds:
+ * the enrolled VTA's DID plus any granted executor DIDs. The request's Data
+ * Integrity proof is verified first ([`crate::proof::verify_signed_request`]);
+ * an unverifiable request returns [`FfiError::UntrustedIssuer`] and MUST NOT
+ * be prompted on. Async because verification resolves the issuer's DID for its
+ * key material (through the crate's shared resolver cache).
+ *
+ * The document is then deserialised and structurally validated via
+ * `trust-tasks-rs` (well-formed envelope + required payload fields) and the
+ * fields the native consent UI needs are surfaced. Returns
+ * [`FfiError::Decode`] if the input is not a well-formed approve-request.
+ */
+public func parseStepUpRequest(json: String, trustedIssuers: [String])async throws  -> StepUpRequest  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_func_parse_step_up_request(FfiConverterString.lower(json),FfiConverterSequenceString.lower(trustedIssuers)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeStepUpRequest_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+/**
+ * Build a holder-signed `vta/witness/<task>` request to the holder's VTA.
+ *
+ * `payload_json` is the task's payload, checked against the task's generated type before
+ * anything is signed. For [`WitnessTask::Present`] and [`WitnessTask::Accept`] it is
+ * `{"sessionId": …, "response": <the witness's answer, as received>}`.
+ */
+public func buildWitnessTask(env: AuthEnvelope, task: WitnessTask, payloadJson: String, signer: Signer)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_build_witness_task(
+        FfiConverterTypeAuthEnvelope_lower(env),
+        FfiConverterTypeWitnessTask_lower(task),
+        FfiConverterString.lower(payloadJson),
+        FfiConverterCallbackInterfaceSigner_lower(signer),uniffiCallStatus
+    )
+})
+}
+/**
+ * Refuse to carry `document_json` unless it is the `kind` document of session `session_id`,
+ * signed and issued by `relationship_did`, and addressed to `witness_did`.
+ *
+ * The VTA builds these documents; this is the wallet's own check that what it is about to
+ * send in the relationship DID's name is what it asked for, to the witness it named
+ * (CONVENTIONS §6: send each document only to its `recipient`). A session document's `id` is
+ * the session id; a submit document is threaded to it.
+ */
+public func checkWitnessDocument(documentJson: String, kind: WitnessDocument, sessionId: String, relationshipDid: String, witnessDid: String)throws   {try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_check_witness_document(
+        FfiConverterString.lower(documentJson),
+        FfiConverterTypeWitnessDocument_lower(kind),
+        FfiConverterString.lower(sessionId),
+        FfiConverterString.lower(relationshipDid),
+        FfiConverterString.lower(witnessDid),uniffiCallStatus
+    )
+}
+}
+/**
+ * Classify the witness's answer to `request_json` (the document the wallet carried), once it
+ * is proven to be `witness_did`'s.
+ *
+ * The answer must pass [`verify_trust_task_reply`](crate::reply::verify_trust_task_reply)
+ * first — a proof by the witness under `authentication`, threaded to the document, addressed
+ * to the relationship DID — or this is [`FfiError::UnverifiedReply`]: discard it unread. A
+ * refusal is held to the same rule as a success, so a forged refusal cannot make the wallet
+ * abandon a session.
+ *
+ * Over DIDComm, [`MediatorSession::send_trust_task`](crate::mediator::MediatorSession) has
+ * already verified the reply; checking again here costs a cached resolution.
+ */
+public func classifyWitnessReply(requestJson: String, replyJson: String, witnessDid: String)async throws  -> WitnessReply  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_func_classify_witness_reply(FfiConverterString.lower(requestJson),FfiConverterString.lower(replyJson),FfiConverterString.lower(witnessDid)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWitnessReply_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+/**
+ * Check a `vta/witness/<task>#response` against the task's generated response type and return its
+ * payload as JSON. A `trust-task-error` from the VTA (`sessionUnknown`, `responseInvalid`,
+ * `vwcInvalid`, …) is not a response and fails here with `Decode`; the native layer reads its
+ * `payload.code` itself, as for every other VTA task.
+ */
+public func parseWitnessResponse(task: WitnessTask, json: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_vta_mobile_core_fn_func_parse_witness_response(
+        FfiConverterTypeWitnessTask_lower(task),
+        FfiConverterString.lower(json),uniffiCallStatus
+    )
+})
+}
+/**
+ * Resolve the relationship DID and the witness DID and pick the transport to carry the
+ * session on: the highest-preference one both advertise (TSP, then DIDComm), matched on
+ * service `type`. REST is never a candidate — a witness answers the transport-proven sender,
+ * which an HTTPS POST does not prove. Neither in common is `InvalidInput` naming both sets.
+ */
+public func resolveWitnessRoute(relationshipDid: String, witnessDid: String)async throws  -> WitnessRoute  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_vta_mobile_core_fn_func_resolve_witness_route(FfiConverterString.lower(relationshipDid),FfiConverterString.lower(witnessDid)
+                )
+            },
+            pollFunc: ffi_vta_mobile_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_vta_mobile_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_vta_mobile_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWitnessRoute_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
 }
 
 private enum InitializationResult {
@@ -4732,165 +5909,197 @@ private enum InitializationResult {
     case contractVersionMismatch
     case apiChecksumMismatch
 }
-
-/// Use a global variable to perform the versioning checks. Swift ensures that
-/// the code inside is only computed once.
-private var initializationResult: InitializationResult = {
+// Use a global variable to perform the versioning checks. Swift ensures that
+// the code inside is only computed once.
+private let initializationResult: InitializationResult = {
     // Get the bindings contract version from our ComponentInterface
-    let bindings_contract_version = 26
+    let bindings_contract_version = 30
     // Get the scaffolding contract version by calling the into the dylib
     let scaffolding_contract_version = ffi_vta_mobile_core_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_build_approve_response_denied() != 686 {
+    if (uniffi_vta_mobile_core_checksum_func_challenge_len_bytes() != 15859) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_build_approve_response_did_signed() != 58960 {
+    if (uniffi_vta_mobile_core_checksum_func_engine_info() != 32885) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_build_approve_response_webauthn() != 38305 {
+    if (uniffi_vta_mobile_core_checksum_func_init_logging() != 2102) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_build_auth_challenge() != 60981 {
+    if (uniffi_vta_mobile_core_checksum_func_library_version() != 30414) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_build_authenticate() != 36319 {
+    if (uniffi_vta_mobile_core_checksum_func_build_task_consent_decision_denied() != 9590) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_build_device_set_wake() != 3496 {
+    if (uniffi_vta_mobile_core_checksum_func_build_task_consent_decision_did_signed() != 64172) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_build_push_register() != 56991 {
+    if (uniffi_vta_mobile_core_checksum_func_parse_task_consent_request() != 39562) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_build_refresh() != 34815 {
+    if (uniffi_vta_mobile_core_checksum_func_didcomm_holder_keys() != 18158) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_build_revoke_all_sessions() != 60647 {
+    if (uniffi_vta_mobile_core_checksum_func_resolve_agent_name() != 44133) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_build_revoke_session() != 1406 {
+    if (uniffi_vta_mobile_core_checksum_func_shorten_did() != 2800) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_build_task_consent_decision_denied() != 2919 {
+    if (uniffi_vta_mobile_core_checksum_func_sign_challenge() != 61046) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_build_task_consent_decision_did_signed() != 10113 {
+    if (uniffi_vta_mobile_core_checksum_func_build_pcs_task() != 37760) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_build_whoami() != 28487 {
+    if (uniffi_vta_mobile_core_checksum_func_parse_pcs_response() != 2522) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_challenge_len_bytes() != 3415 {
+    if (uniffi_vta_mobile_core_checksum_func_build_device_set_wake() != 24816) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_didcomm_holder_keys() != 42414 {
+    if (uniffi_vta_mobile_core_checksum_func_build_push_register() != 26488) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_engine_info() != 27653 {
+    if (uniffi_vta_mobile_core_checksum_func_parse_device_set_wake_response() != 19446) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_init_logging() != 2402 {
+    if (uniffi_vta_mobile_core_checksum_func_parse_push_register_response() != 16802) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_library_version() != 15418 {
+    if (uniffi_vta_mobile_core_checksum_func_verify_trust_task_reply() != 21234) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_parse_auth_challenge_response() != 63094 {
+    if (uniffi_vta_mobile_core_checksum_func_resolve_did() != 19764) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_parse_authenticate_response() != 23695 {
+    if (uniffi_vta_mobile_core_checksum_func_resolve_vta_endpoints() != 16046) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_parse_device_set_wake_response() != 25040 {
+    if (uniffi_vta_mobile_core_checksum_func_build_auth_challenge() != 18097) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_parse_push_register_response() != 64039 {
+    if (uniffi_vta_mobile_core_checksum_func_build_authenticate() != 3401) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_parse_refresh_response() != 37853 {
+    if (uniffi_vta_mobile_core_checksum_func_build_messaging_ping() != 13328) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_parse_revoke_session_response() != 5951 {
+    if (uniffi_vta_mobile_core_checksum_func_build_refresh() != 5701) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_parse_step_up_request() != 63345 {
+    if (uniffi_vta_mobile_core_checksum_func_build_revoke_all_sessions() != 43287) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_parse_task_consent_request() != 28523 {
+    if (uniffi_vta_mobile_core_checksum_func_build_revoke_session() != 35739) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_parse_whoami_response() != 41103 {
+    if (uniffi_vta_mobile_core_checksum_func_build_whoami() != 49282) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_resolve_agent_name() != 49028 {
+    if (uniffi_vta_mobile_core_checksum_func_parse_auth_challenge_response() != 8900) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_resolve_did() != 1426 {
+    if (uniffi_vta_mobile_core_checksum_func_parse_authenticate_response() != 862) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_resolve_vta_endpoints() != 19323 {
+    if (uniffi_vta_mobile_core_checksum_func_parse_refresh_response() != 15753) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_shorten_did() != 29999 {
+    if (uniffi_vta_mobile_core_checksum_func_parse_revoke_session_response() != 24631) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_func_sign_challenge() != 49514 {
+    if (uniffi_vta_mobile_core_checksum_func_parse_whoami_response() != 34649) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_method_didcommsession_add_peer() != 24561 {
+    if (uniffi_vta_mobile_core_checksum_func_build_approve_response_denied() != 13874) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_method_didcommsession_add_route() != 50023 {
+    if (uniffi_vta_mobile_core_checksum_func_build_approve_response_did_signed() != 44761) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_method_didcommsession_pack_anoncrypt() != 64463 {
+    if (uniffi_vta_mobile_core_checksum_func_build_approve_response_webauthn() != 56605) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_method_didcommsession_pack_authcrypt() != 109 {
+    if (uniffi_vta_mobile_core_checksum_func_parse_consent_request() != 33002) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_method_didcommsession_unpack() != 38726 {
+    if (uniffi_vta_mobile_core_checksum_func_parse_step_up_request() != 23412) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_method_mediatorsession_receive_next() != 7212 {
+    if (uniffi_vta_mobile_core_checksum_func_build_witness_task() != 15176) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_method_mediatorsession_send_trust_task() != 2189 {
+    if (uniffi_vta_mobile_core_checksum_func_check_witness_document() != 3907) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_method_mediatorsession_send_trust_task_one_way() != 45781 {
+    if (uniffi_vta_mobile_core_checksum_func_classify_witness_reply() != 48533) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_method_mediatorsession_shutdown() != 60334 {
+    if (uniffi_vta_mobile_core_checksum_func_parse_witness_response() != 49364) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_method_tspmediatorsession_announce() != 61543 {
+    if (uniffi_vta_mobile_core_checksum_func_resolve_witness_route() != 48667) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_method_tspmediatorsession_receive_next() != 32079 {
+    if (uniffi_vta_mobile_core_checksum_method_didcommsession_add_peer() != 26474) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_method_tspmediatorsession_send_trust_task() != 60157 {
+    if (uniffi_vta_mobile_core_checksum_method_didcommsession_add_route() != 3758) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_method_tspmediatorsession_shutdown() != 4555 {
+    if (uniffi_vta_mobile_core_checksum_method_didcommsession_pack_anoncrypt() != 62251) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_constructor_didcommsession_new() != 3414 {
+    if (uniffi_vta_mobile_core_checksum_method_didcommsession_pack_authcrypt() != 6189) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_constructor_mediatorsession_connect() != 6555 {
+    if (uniffi_vta_mobile_core_checksum_method_didcommsession_unpack() != 40391) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_constructor_tspmediatorsession_connect() != 23067 {
+    if (uniffi_vta_mobile_core_checksum_method_mediatorsession_receive_next() != 11612) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_method_signer_did() != 10383 {
+    if (uniffi_vta_mobile_core_checksum_method_mediatorsession_send_trust_task() != 31872) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_vta_mobile_core_checksum_method_signer_sign() != 37740 {
+    if (uniffi_vta_mobile_core_checksum_method_mediatorsession_send_trust_task_one_way() != 49589) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vta_mobile_core_checksum_method_mediatorsession_shutdown() != 9132) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vta_mobile_core_checksum_method_tspmediatorsession_receive_next() != 56372) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vta_mobile_core_checksum_method_tspmediatorsession_send_trust_task() != 2745) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vta_mobile_core_checksum_method_tspmediatorsession_shutdown() != 1514) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vta_mobile_core_checksum_constructor_didcommsession_new() != 32172) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vta_mobile_core_checksum_constructor_mediatorsession_connect() != 7174) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vta_mobile_core_checksum_constructor_mediatorsession_connect_with_secrets() != 12713) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vta_mobile_core_checksum_constructor_tspmediatorsession_connect() != 18501) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vta_mobile_core_checksum_constructor_tspmediatorsession_connect_with_secrets() != 27314) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vta_mobile_core_checksum_method_signer_did() != 64224) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vta_mobile_core_checksum_method_signer_sign() != 22375) {
         return InitializationResult.apiChecksumMismatch
     }
 
@@ -4898,7 +6107,9 @@ private var initializationResult: InitializationResult = {
     return InitializationResult.ok
 }()
 
-private func uniffiEnsureInitialized() {
+// Make the ensure init function public so that other modules which have external type references to
+// our types can call it.
+public func uniffiEnsureVtaMobileCoreInitialized() {
     switch initializationResult {
     case .ok:
         break

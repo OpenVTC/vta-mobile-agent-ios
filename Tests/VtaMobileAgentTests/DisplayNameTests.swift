@@ -31,7 +31,7 @@ final class DisplayNameTests: XCTestCase {
             // the informative half, which a trailing ellipsis would have eaten.
             (
                 "did:webvh:QmXkAbCdEfGhIjKlMnOp:webvh.storm.ws:glenn-vta",
-                "did:webvh:QmXkAbCdEf…:webvh.storm.ws:glenn-vta"
+                "did:webvh:QmXkAbCdEf…:…storm.ws:glenn-vta"
             ),
             // web: same rule.
             (

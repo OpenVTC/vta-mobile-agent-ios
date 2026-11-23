@@ -47,9 +47,9 @@ extension VtaMobileAgent {
     /// executor's status.
     ///
     /// The approver's authority is the decision proof, so this device always
-    /// signs as its own holder DID. `transport` proves the *sender* to the VTA
-    /// (authcrypt or TSP), which is what authorizes the submission — there is no
-    /// bearer token.
+    /// signs as its own holder DID. The VTA accepts the submission only when
+    /// that proof verifies as the decision's `issuer` and the issuer is the
+    /// transport sender (authcrypt or TSP) — there is no bearer token.
     @discardableResult
     public static func approveTaskConsent(
         request doc: String,
