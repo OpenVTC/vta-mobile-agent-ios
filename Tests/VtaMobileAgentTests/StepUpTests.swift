@@ -10,7 +10,7 @@ final class StepUpTests: XCTestCase {
     func testUnwrapExtractsApproveRequestFrom403Body() {
         let body = """
             {"error":"step_up_required","requiredAcr":"aal2",
-             "approveRequest":{"id":"urn:uuid:x","type":"…/approve-request/0.1",
+             "approveRequest":{"id":"urn:uuid:x","type":"…/approve-request/0.5",
              "payload":{"subject":"did:key:zSubject","sessionId":"sess-1",
              "challenge":"abc","targetAcr":"aal2"}}}
             """
@@ -24,7 +24,7 @@ final class StepUpTests: XCTestCase {
 
     /// A bare approve-request document is returned unchanged.
     func testUnwrapPassesThroughBareDocument() {
-        let doc = #"{"id":"urn:uuid:y","type":"…/approve-request/0.1","payload":{}}"#
+        let doc = #"{"id":"urn:uuid:y","type":"…/approve-request/0.5","payload":{}}"#
         XCTAssertEqual(VtaMobileAgent.unwrapApproveRequest(doc), doc)
     }
 

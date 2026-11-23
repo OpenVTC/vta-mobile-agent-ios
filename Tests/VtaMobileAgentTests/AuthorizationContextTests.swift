@@ -10,10 +10,11 @@ import VtaMobileCore
 /// `authorizationContext`, and `AuthorizationContext.decode` turns it into the
 /// typed model the card renders.
 ///
-/// The fixtures are **signed**: `eddsa-jcs-2022` proofs under
-/// `proofPurpose: authentication`, as the VTA signs what it pushes, minted by
-/// vta-mobile-core's deterministic test executor key (`proof::test_support`,
-/// seed 17), whose `did:key` issuer resolves offline — so the tests exercise
+/// The fixtures are **signed** `auth/step-up/approve-request/0.5` documents:
+/// `eddsa-jcs-2022` proofs under `proofPurpose: authentication`, as the VTA
+/// signs what it pushes, minted (and checked to parse) by vta-mobile-core
+/// v0.6.18's `sign_as` with its deterministic test executor key
+/// (`proof::test_support`, seed 17), whose `did:key` issuer resolves offline — so the tests exercise
 /// the full on-device verification path without touching the network. The
 /// proof has no expiry, so the static fixtures stay valid.
 final class AuthorizationContextTests: XCTestCase {
@@ -24,12 +25,12 @@ final class AuthorizationContextTests: XCTestCase {
     /// A share ask carried under the reverse-DNS `payload.ext` key, signed by
     /// the fixture issuer.
     private let shareRequest = #"""
-        {"id":"urn:uuid:x","issuer":"did:key:z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S","payload":{"challenge":"VHJhbnNmZXJDb25maXJtTm9uY2VYWQ","ext":{"org.openvtc.authorization-context":{"action":{"capabilities":[],"fields":["salaryBand"],"from":"finance","kind":"share","purpose":"book flights within policy","to":"travel","ttlSeconds":3600},"detail":"book flights within policy","domain":"finance","risk":"high","summary":"finance wants to share salaryBand with travel","tenant":"acme","type":"https://openvtc.org/cierge/authorization-context/0.1"}},"reason":"finance wants to share salaryBand with travel","sessionId":"sess-1","subject":"did:webvh:operator","targetAcr":"aal2"},"proof":{"created":"2026-09-25T20:25:01Z","cryptosuite":"eddsa-jcs-2022","proofPurpose":"authentication","proofValue":"z784c44BsmqGdFLHpAnutBYBKwcfcm9rBvS56adD1NF2jdE7USQiAnfyc41EkMJZAoVndwrzw5nACNamdTNFeYLK","type":"DataIntegrityProof","verificationMethod":"did:key:z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S#z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S"},"type":"https://trusttasks.org/spec/auth/step-up/approve-request/0.1"}
+        {"id":"urn:uuid:x","issuer":"did:key:z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S","payload":{"accepts":["didSigned"],"challenge":"VHJhbnNmZXJDb25maXJtTm9uY2VYWQ","ext":{"org.openvtc.authorization-context":{"action":{"capabilities":[],"fields":["salaryBand"],"from":"finance","kind":"share","purpose":"book flights within policy","to":"travel","ttlSeconds":3600},"detail":"book flights within policy","domain":"finance","risk":"high","summary":"finance wants to share salaryBand with travel","tenant":"acme","type":"https://openvtc.org/cierge/authorization-context/0.1"}},"reason":"finance wants to share salaryBand with travel","sessionId":"sess-1","subject":"did:webvh:operator","targetAcr":"aal2"},"proof":{"created":"2026-11-23T16:45:25Z","cryptosuite":"eddsa-jcs-2022","proofPurpose":"authentication","proofValue":"z66FV7e5E3dn2LgBiz3hM1X8tpRRZPAvLKw7QjJiwK8MK6ne72iVs8qh8b4vzAuewJQfFf6bMsuGJUcmnN44M5ASZ","type":"DataIntegrityProof","verificationMethod":"did:key:z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S#z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S"},"recipient":"did:webvh:operator","type":"https://trusttasks.org/spec/auth/step-up/approve-request/0.5"}
         """#
 
     /// A plain login-elevation step-up (no ext), signed by the fixture issuer.
     private let plainRequest = #"""
-        {"id":"urn:uuid:y","issuer":"did:key:z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S","payload":{"challenge":"VHJhbnNmZXJDb25maXJtTm9uY2VYWQ","reason":"Approve sign-in","sessionId":"s1","subject":"did:key:zAlice"},"proof":{"created":"2026-09-25T20:25:01Z","cryptosuite":"eddsa-jcs-2022","proofPurpose":"authentication","proofValue":"z5XwPypcJfyBGAmFyM6f2ZHc5XsegQDc2mmJCM4ppwQFqqZEE15z5jNu4Q6jz1nFzK6bEZaBo65gPpgEUnY4mv2e","type":"DataIntegrityProof","verificationMethod":"did:key:z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S#z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S"},"type":"https://trusttasks.org/spec/auth/step-up/approve-request/0.1"}
+        {"id":"urn:uuid:y","issuer":"did:key:z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S","payload":{"accepts":["didSigned"],"challenge":"VHJhbnNmZXJDb25maXJtTm9uY2VYWQ","reason":"Approve sign-in","sessionId":"s1","subject":"did:key:zAlice"},"proof":{"created":"2026-11-23T16:45:25Z","cryptosuite":"eddsa-jcs-2022","proofPurpose":"authentication","proofValue":"z4ZqYkCQAGVEARHPkfy2542V5Znwh5NQ2dvuKodxDbrbNHy6z83n6GYvDf28PKc48LodiRwR1HYJoq6NeZYARKitA","type":"DataIntegrityProof","verificationMethod":"did:key:z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S#z6MktULudTtAsAhRegYPiZ6631RV3viv12qd4GQF8z1xB22S"},"recipient":"did:key:zAlice","type":"https://trusttasks.org/spec/auth/step-up/approve-request/0.5"}
         """#
 
     private var enrolled: [String] { [fixtureIssuer] }
@@ -83,11 +84,13 @@ final class AuthorizationContextTests: XCTestCase {
         let unsigned = """
             {
               "id": "urn:uuid:z",
-              "type": "https://trusttasks.org/spec/auth/step-up/approve-request/0.1",
+              "type": "https://trusttasks.org/spec/auth/step-up/approve-request/0.5",
               "issuer": "\(fixtureIssuer)",
+              "recipient": "did:key:zAlice",
               "payload": {
                 "subject": "did:key:zAlice", "sessionId": "s1",
-                "challenge": "VHJhbnNmZXJDb25maXJtTm9uY2VYWQ", "reason": "Approve sign-in"
+                "challenge": "VHJhbnNmZXJDb25maXJtTm9uY2VYWQ", "reason": "Approve sign-in",
+                "accepts": ["didSigned"]
               }
             }
             """

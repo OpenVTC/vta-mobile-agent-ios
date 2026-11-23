@@ -37,7 +37,7 @@ final class DidcommReceiveTests: XCTestCase {
         let vtaSession = try DidcommSession(holder: vtaKeys)
         try vtaSession.addPeer(peer: peer(for: holderKeys))
         let message =
-            #"{"id":"urn:uuid:msg","type":"https://didcomm.org/trust-task/1.0/task","body":{"type":"https://trusttasks.org/spec/auth/step-up/approve-request/0.1","id":"urn:uuid:abc","payload":{"subject":"\#(holderDid)","sessionId":"s1","challenge":"chal","targetAcr":"aal2"}}}"#
+            #"{"id":"urn:uuid:msg","type":"https://didcomm.org/trust-task/1.0/task","body":{"type":"https://trusttasks.org/spec/auth/step-up/approve-request/0.5","id":"urn:uuid:abc","payload":{"subject":"\#(holderDid)","sessionId":"s1","challenge":"chal","targetAcr":"aal2"}}}"#
         let packed = try vtaSession.packAuthcrypt(messageJson: message, recipientDid: holderDid)
 
         // Holder side unpacks it (authenticating the VTA as sender).
@@ -58,7 +58,16 @@ final class DidcommReceiveTests: XCTestCase {
     func testIsStepUpApproveRequestFilters() {
         XCTAssertTrue(
             VtaMobileAgent.isStepUpApproveRequest(
-                #"{"type":"https://trusttasks.org/spec/auth/step-up/approve-request/0.1"}"#))
+                #"{"type":"https://trusttasks.org/spec/auth/step-up/approve-request/0.5"}"#))
+        // Superseded versions: no supported VTA mints them and the engine
+        // would refuse them, so they are not routed as step-ups.
+        for old in ["0.1", "0.2", "0.4"] {
+            XCTAssertFalse(
+                VtaMobileAgent.isStepUpApproveRequest(
+                    #"{"type":"https://trusttasks.org/spec/auth/step-up/approve-request/"#
+                        + old + #""}"#),
+                "approve-request/\(old) must not route")
+        }
         XCTAssertFalse(
             VtaMobileAgent.isStepUpApproveRequest(
                 #"{"type":"https://trusttasks.org/spec/auth/whoami/0.1"}"#))
