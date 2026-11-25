@@ -93,17 +93,21 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     /// the review queue, then report whether anything arrived so the OS can
     /// schedule the next background opportunity appropriately.
     ///
-    /// `nonisolated` to match the requirement UIKit calls: a main-actor
-    /// implementation would have the non-`Sendable` `userInfo` sent across
-    /// isolation (an error in the Swift 6 language mode). The payload is
-    /// contentless and unused; the drain itself still runs on the main actor,
-    /// reached through the `await`.
-    nonisolated func application(
+    /// The completion-handler form, not the `async` one: UIKit calls this
+    /// synchronously on the main actor, so the non-`Sendable` `userInfo` never
+    /// leaves it. The `async` import has UIKit's caller send `userInfo` into the
+    /// implementation, which is an error in the Swift 6 language mode whatever
+    /// the implementation's isolation. The task inherits the main actor, and the
+    /// handler is called once, with the same result as before.
+    func application(
         _ application: UIApplication,
-        didReceiveRemoteNotification userInfo: [AnyHashable: Any]
-    ) async -> UIBackgroundFetchResult {
-        let received = await AgentModel.shared.handlePushWake()
-        return received ? .newData : .noData
+        didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+        fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
+    ) {
+        Task {
+            let received = await AgentModel.shared.handlePushWake()
+            completionHandler(received ? .newData : .noData)
+        }
     }
 
     /// Show foreground notifications too, so a live test is visible while the app
