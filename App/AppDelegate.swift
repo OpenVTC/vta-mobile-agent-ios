@@ -84,18 +84,30 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _ application: UIApplication,
         didFailToRegisterForRemoteNotificationsWithError error: Error
     ) {
-        Task { await AgentModel.shared.onApnsRegisterFailed(error) }
+        // Synchronous and main-actor on both sides (the delegate and
+        // `AgentModel`), so there is nothing to await and no task to spawn.
+        AgentModel.shared.onApnsRegisterFailed(error)
     }
 
     /// Background (`content-available`) push — the contentless wake. Drain into
     /// the review queue, then report whether anything arrived so the OS can
     /// schedule the next background opportunity appropriately.
+    ///
+    /// The completion-handler form, not the `async` one: UIKit calls this
+    /// synchronously on the main actor, so the non-`Sendable` `userInfo` never
+    /// leaves it. The `async` import has UIKit's caller send `userInfo` into the
+    /// implementation, which is an error in the Swift 6 language mode whatever
+    /// the implementation's isolation. The task inherits the main actor, and the
+    /// handler is called once, with the same result as before.
     func application(
         _ application: UIApplication,
-        didReceiveRemoteNotification userInfo: [AnyHashable: Any]
-    ) async -> UIBackgroundFetchResult {
-        let received = await AgentModel.shared.handlePushWake()
-        return received ? .newData : .noData
+        didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+        fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
+    ) {
+        Task {
+            let received = await AgentModel.shared.handlePushWake()
+            completionHandler(received ? .newData : .noData)
+        }
     }
 
     /// Show foreground notifications too, so a live test is visible while the app
